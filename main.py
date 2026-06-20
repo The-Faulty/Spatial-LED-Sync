@@ -9,7 +9,7 @@ import cv2
 from config import EngineConfig, write_default_config
 from logger import setup_logging
 from performance import apply_runtime_profile, valid_runtime_profiles
-from runtime import EngineRuntime
+from effects_engine import HeadlessEffectsEngine
 from visualization import Visualizer
 
 
@@ -54,7 +54,7 @@ def main() -> int:
 
     logger = setup_logging(config.log_level, config.log_file)
     visualizer = Visualizer(config) if config.debug else None
-    runtime = EngineRuntime(config, logger)
+    runtime = HeadlessEffectsEngine(config, logger)
 
     stopping = False
 

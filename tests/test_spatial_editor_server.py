@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from config import EngineConfig
+from effects_engine import HeadlessEffectsEngine
 from runtime import RuntimeSnapshot
 from spatial_config import default_spatial_dict
 from spatial_editor_server import SpatialEditorHandler
@@ -186,6 +187,8 @@ class EditorServerCase(unittest.TestCase):
                 break
             time.sleep(0.1)
         self.assertTrue(status.get("running"))
+        self.assertIsInstance(SpatialEditorHandler.preview_manager.runtime, HeadlessEffectsEngine)
+        self.assertFalse(SpatialEditorHandler.preview_manager.runtime.config.send_to_wled)
         self.assertFalse(status.get("wled_enabled"))
         self.assertEqual(status.get("led_count"), 6)
         self.assertEqual(len(status.get("leds_flat", [])), 18)

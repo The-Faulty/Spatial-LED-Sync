@@ -16,7 +16,7 @@ import cv2
 import numpy as np
 
 from config import EngineConfig
-from runtime import EngineRuntime, RuntimeSnapshot
+from effects_engine import HeadlessEffectsEngine, RuntimeSnapshot
 from spatial_config import pack_spatial_device_ranges, parse_spatial_config, spatial_config_to_dict, validate_spatial_config
 from spatial_topology import SpatialRoomTopology
 
@@ -27,7 +27,7 @@ WEB_ROOT = ROOT / "web_editor"
 
 class PreviewRuntimeManager:
     def __init__(self) -> None:
-        self.runtime: EngineRuntime | None = None
+        self.runtime: HeadlessEffectsEngine | None = None
         self.thread: threading.Thread | None = None
         self.stop_event = threading.Event()
         self.lock = threading.Lock()
@@ -47,7 +47,7 @@ class PreviewRuntimeManager:
             config.debug = False
             logger = logging.getLogger("spatial_editor.preview")
             logger.addHandler(logging.NullHandler())
-            self.runtime = EngineRuntime(copy.deepcopy(config), logger)
+            self.runtime = HeadlessEffectsEngine(copy.deepcopy(config), logger)
             try:
                 self.runtime.start()
             except Exception as exc:

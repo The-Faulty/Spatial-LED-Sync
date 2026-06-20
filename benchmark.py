@@ -8,7 +8,7 @@ import time
 from config import EngineConfig
 from logger import setup_logging
 from performance import apply_runtime_profile, valid_runtime_profiles
-from runtime import EngineRuntime
+from effects_engine import HeadlessEffectsEngine
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,7 +34,7 @@ def main() -> int:
 
     logger = setup_logging("WARNING", config.log_file)
     logger.setLevel(logging.WARNING)
-    runtime = EngineRuntime(config, logger)
+    runtime = HeadlessEffectsEngine(config, logger)
     runtime.start()
     frame_interval = 1.0 / max(1, config.target_fps)
     started = time.monotonic()

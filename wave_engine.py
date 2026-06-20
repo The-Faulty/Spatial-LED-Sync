@@ -29,6 +29,7 @@ class WaveEngine:
     def __init__(self, config: EngineConfig, topology: RoomTopology):
         self.config = config
         self.topology = topology
+        self.accepts_front_ambient_strip_sample = True
         self.waves: list[LightWave] = []
         self.previous_leds = np.zeros((config.total_leds, 3), dtype=np.float32)
         self.front_ambient_color = np.zeros(3, dtype=np.float32)
@@ -73,6 +74,9 @@ class WaveEngine:
                 )
         if len(self.waves) > self.config.max_active_waves:
             self.waves = sorted(self.waves, key=lambda w: w.intensity, reverse=True)[: self.config.max_active_waves]
+
+    def set_tv_frame(self, frame_bgr: np.ndarray | None) -> None:
+        return None
 
     def set_front_ambient_strip(self, colors: np.ndarray, intensity: float) -> None:
         if colors.size == 0:

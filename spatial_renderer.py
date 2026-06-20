@@ -13,6 +13,7 @@ from spatial_topology import SpatialRoomTopology
 
 class SpatialRenderer(Protocol):
     waves: list[object]
+    accepts_front_ambient_strip_sample: bool
 
     def add_events(self, events: list[LightEvent]) -> None:
         ...
@@ -48,6 +49,7 @@ class VectorizedSpatialRenderer:
     def __init__(self, config: EngineConfig, topology: SpatialRoomTopology):
         self.config = config
         self.topology = topology
+        self.accepts_front_ambient_strip_sample = False
         self.waves: list[SpatialLightWave] = []
         self.previous_leds = np.zeros((topology.total, 3), dtype=np.float32)
         self.tv_frame: np.ndarray | None = None

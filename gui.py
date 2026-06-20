@@ -11,7 +11,7 @@ from PIL import Image, ImageDraw, ImageTk
 
 from config import EngineConfig
 from logger import setup_logging
-from runtime import EngineRuntime, RuntimeSnapshot
+from effects_engine import HeadlessEffectsEngine, RuntimeSnapshot
 from topology import RoomTopology
 from visualization import Visualizer
 
@@ -49,7 +49,7 @@ class CinematicSpillGUI:
         self.config = EngineConfig.load(self.config_path)
         self.config.send_to_wled = False
         self.logger = setup_logging(self.config.log_level, self.config.log_file)
-        self.runtime = EngineRuntime(copy.deepcopy(self.config), self.logger)
+        self.runtime = HeadlessEffectsEngine(copy.deepcopy(self.config), self.logger)
         self.vars: dict[str, ConfigVar] = {}
         self.slider_vars: dict[str, ConfigVar] = {}
         self.slider_dirty: set[str] = set()
