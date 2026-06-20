@@ -102,6 +102,15 @@
           <label>Extension Of
             <select id="strip-extends"></select>
           </label>
+          <label>Extension Mode
+            <select id="strip-extension-mode">
+              <option value="soft_spill">soft_spill</option>
+              <option value="edge_reach">edge_reach</option>
+              <option value="effects_only">effects_only</option>
+            </select>
+          </label>
+          <label>Extension Strength <input id="strip-extension-strength" type="range" min="0" max="1" step="0.05" /></label>
+          <label>Extension Softness <input id="strip-extension-softness" type="range" min="0" max="1" step="0.05" /></label>
           <label>Blend <input id="strip-blend" type="range" min="0" max="1" step="0.05" /></label>
           <div class="nudge-grid">
             <button id="strip-nudge-left" type="button">U -</button>

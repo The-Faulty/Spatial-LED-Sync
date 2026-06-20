@@ -141,6 +141,37 @@ class EditorServerCase(unittest.TestCase):
         self.assertEqual(saved["blend"], 0.8)
         self.assertGreaterEqual(self.saved_spatial()["devices"][0]["led_count"], 30)
 
+    def test_extension_mode_fields_persist(self) -> None:
+        spatial = self.get_config()["spatial"]
+        spatial["strips"][0]["tv_role"] = "bottom"
+        spatial["strips"].append(
+            {
+                "id": "edge-extension",
+                "name": "Edge Extension",
+                "wall": "front",
+                "start_u": 0.4,
+                "start_v": 0.8,
+                "end_u": 0.4,
+                "end_v": 0.1,
+                "led_count": 4,
+                "direction": "forward",
+                "device_id": "main",
+                "device_start": 0,
+                "sync_mode": "blend",
+                "blend": 0.4,
+                "tv_role": "none",
+                "extends_strip_id": "front",
+                "extension_mode": "edge_reach",
+                "extension_strength": 0.75,
+                "extension_softness": 0.25,
+            }
+        )
+        self.assertTrue(self.post_spatial(spatial)["ok"])
+        saved = self.saved_spatial()["strips"][1]
+        self.assertEqual(saved["extension_mode"], "edge_reach")
+        self.assertEqual(saved["extension_strength"], 0.75)
+        self.assertEqual(saved["extension_softness"], 0.25)
+
     def test_preview_runtime_endpoints_force_wled_off(self) -> None:
         raw = json.loads(self.config_path.read_text(encoding="utf-8"))
         raw["send_to_wled"] = True
@@ -187,6 +218,8 @@ class EditorServerCase(unittest.TestCase):
         self.assertIn(b"leds_flat", app)
         self.assertIn(b"mirrorHorizontal", app)
         self.assertIn(b"drawViewHud", app)
+        self.assertIn(b'id="strip-extension-mode"', index)
+        self.assertIn(b"extension_strength", app)
 
     def get_json(self, path: str) -> dict:
         with urllib.request.urlopen(self.base_url + path, timeout=3) as response:

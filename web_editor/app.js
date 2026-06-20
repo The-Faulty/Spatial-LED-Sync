@@ -55,6 +55,9 @@ const fields = {
   stripSyncMode: document.querySelector("#strip-sync-mode"),
   stripTvRole: document.querySelector("#strip-tv-role"),
   stripExtends: document.querySelector("#strip-extends"),
+  stripExtensionMode: document.querySelector("#strip-extension-mode"),
+  stripExtensionStrength: document.querySelector("#strip-extension-strength"),
+  stripExtensionSoftness: document.querySelector("#strip-extension-softness"),
   stripBlend: document.querySelector("#strip-blend"),
   stripNudgeLeft: document.querySelector("#strip-nudge-left"),
   stripNudgeRight: document.querySelector("#strip-nudge-right"),
@@ -199,7 +202,11 @@ function bindStripEditor() {
   fields.stripSyncMode.value = strip.sync_mode || "spatial";
   fields.stripTvRole.value = strip.tv_role || "none";
   fields.stripExtends.value = strip.extends_strip_id || "";
+  fields.stripExtensionMode.value = strip.extension_mode || "soft_spill";
+  fields.stripExtensionStrength.value = strip.extension_strength ?? 0.45;
+  fields.stripExtensionSoftness.value = strip.extension_softness ?? 0.65;
   fields.stripBlend.value = strip.blend ?? 0.5;
+  bindExtensionControls(strip);
 }
 
 function stripEditorInputs() {
@@ -217,6 +224,9 @@ function stripEditorInputs() {
     fields.stripSyncMode,
     fields.stripTvRole,
     fields.stripExtends,
+    fields.stripExtensionMode,
+    fields.stripExtensionStrength,
+    fields.stripExtensionSoftness,
     fields.stripBlend,
   ];
 }
@@ -233,6 +243,16 @@ function clearStripEditor() {
   fields.stripBlend.value = 0.5;
   fields.stripTvRole.value = "none";
   fields.stripExtends.value = "";
+  fields.stripExtensionMode.value = "soft_spill";
+  fields.stripExtensionStrength.value = 0.45;
+  fields.stripExtensionSoftness.value = 0.65;
+}
+
+function bindExtensionControls(strip) {
+  const isExtension = Boolean(strip?.extends_strip_id);
+  fields.stripExtensionMode.disabled = !strip || !isExtension;
+  fields.stripExtensionStrength.disabled = !strip || !isExtension || fields.stripExtensionMode.value === "effects_only";
+  fields.stripExtensionSoftness.disabled = !strip || !isExtension || fields.stripExtensionMode.value === "effects_only";
 }
 
 function bindStripSelect() {
@@ -301,10 +321,16 @@ function updateSelectedStripFromEditor() {
   strip.sync_mode = fields.stripSyncMode.value;
   strip.tv_role = fields.stripTvRole.value || "none";
   strip.extends_strip_id = fields.stripExtends.value || "";
+  strip.extension_mode = fields.stripExtensionMode.value || "soft_spill";
+  strip.extension_strength = Math.max(0, Math.min(1, number(fields.stripExtensionStrength.value, strip.extension_strength ?? 0.45)));
+  strip.extension_softness = Math.max(0, Math.min(1, number(fields.stripExtensionSoftness.value, strip.extension_softness ?? 0.65)));
   if (strip.tv_role !== "none") {
     strip.extends_strip_id = "";
   } else if (strip.extends_strip_id) {
     strip.tv_role = "none";
+  }
+  if (strip.sync_mode === "spatial" && strip.extends_strip_id) {
+    strip.extension_mode = "effects_only";
   }
   strip.blend = Math.max(0, Math.min(1, number(fields.stripBlend.value, strip.blend ?? 0.5)));
   clampStripToRoom(strip);
@@ -554,7 +580,7 @@ function drawTV(tv, project) {
   ].map(project);
   fillPolygon(points, "#050607", "#e8eef6");
   if (previewRunning && previewImage?.complete) {
-    drawImageOnQuad(previewImage, points, true);
+    drawImageOnQuad(previewImage, points, tv.mirror_horizontal !== false);
     strokePolygon(points, "#e8eef6", 2);
   } else {
     const center = project(wallPoint(tv.wall, tv.center_u, tv.center_v));
@@ -596,7 +622,8 @@ function drawStrips(strips, project) {
     }
     stripHitTargets.push({ id: strip.id, points: stripPoints, start, end });
     const role = effectiveTvRole(strip.id);
-    const suffix = role !== "none" ? ` [${role}]` : "";
+    const extension = strip.extends_strip_id ? ` ${strip.extension_mode || "soft_spill"}` : "";
+    const suffix = role !== "none" ? ` [${role}${extension}]` : "";
     label(start, `${strip.name || strip.id}${suffix}`, selected ? "#ffffff" : "#d7e4ef", 8, -8);
     cursor += count;
   }
@@ -1034,6 +1061,9 @@ function addStrip() {
     blend: 0.5,
     tv_role: "none",
     extends_strip_id: "",
+    extension_mode: "soft_spill",
+    extension_strength: 0.45,
+    extension_softness: 0.65,
   });
   selectedStripId = id;
   packDeviceRanges();
@@ -1077,6 +1107,9 @@ for (const input of [
   fields.stripSyncMode,
   fields.stripTvRole,
   fields.stripExtends,
+  fields.stripExtensionMode,
+  fields.stripExtensionStrength,
+  fields.stripExtensionSoftness,
   fields.stripBlend,
 ]) {
   input.addEventListener("input", updateSelectedStripFromEditor);

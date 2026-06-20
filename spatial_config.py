@@ -7,6 +7,7 @@ from typing import Any
 WALLS = {"front", "left", "rear", "right"}
 SYNC_MODES = {"spatial", "tv_image", "blend"}
 TV_ROLES = {"none", "top", "bottom", "left", "right"}
+EXTENSION_MODES = {"soft_spill", "edge_reach", "effects_only"}
 
 
 @dataclass
@@ -24,6 +25,7 @@ class TVPlacement:
     center_v: float = 1.25
     width: float = 1.4
     height: float = 0.8
+    mirror_horizontal: bool = True
 
 
 @dataclass
@@ -53,6 +55,9 @@ class SpatialStrip:
     blend: float = 0.5
     tv_role: str = "none"
     extends_strip_id: str = ""
+    extension_mode: str = "soft_spill"
+    extension_strength: float = 0.45
+    extension_softness: float = 0.65
 
 
 @dataclass
@@ -117,6 +122,9 @@ def _default_strip(
         "blend": 0.5,
         "tv_role": "none",
         "extends_strip_id": "",
+        "extension_mode": "soft_spill",
+        "extension_strength": 0.45,
+        "extension_softness": 0.65,
     }
 
 
@@ -212,6 +220,8 @@ def validate_spatial_config(raw: dict[str, Any] | None, total_leds: int = 240) -
             errors.append(f"spatial.strips.{strip.id}.sync_mode must be spatial, tv_image, or blend")
         if strip.tv_role not in TV_ROLES:
             errors.append(f"spatial.strips.{strip.id}.tv_role must be none, top, bottom, left, or right")
+        if strip.extension_mode not in EXTENSION_MODES:
+            errors.append(f"spatial.strips.{strip.id}.extension_mode must be soft_spill, edge_reach, or effects_only")
         if strip.tv_role != "none" and strip.extends_strip_id:
             errors.append(f"spatial.strips.{strip.id} cannot set both tv_role and extends_strip_id")
         if strip.led_count <= 0:
@@ -227,6 +237,10 @@ def validate_spatial_config(raw: dict[str, Any] | None, total_leds: int = 240) -
                 errors.append(f"spatial.strips.{strip.id}.{attr} must be inside the room height")
         if not 0.0 <= strip.blend <= 1.0:
             errors.append(f"spatial.strips.{strip.id}.blend must be between 0.0 and 1.0")
+        if not 0.0 <= strip.extension_strength <= 1.0:
+            errors.append(f"spatial.strips.{strip.id}.extension_strength must be between 0.0 and 1.0")
+        if not 0.0 <= strip.extension_softness <= 1.0:
+            errors.append(f"spatial.strips.{strip.id}.extension_softness must be between 0.0 and 1.0")
         end = strip.device_start + strip.led_count
         device = next((item for item in spatial.devices if item.id == strip.device_id), None)
         if strip.device_start < 0 or (device and end > device.led_count):

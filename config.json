@@ -114,7 +114,8 @@
       "center_u": 5.6,
       "center_v": 6,
       "width": 4.6,
-      "height": 2.75
+      "height": 2.75,
+      "mirror_horizontal": true
     },
     "devices": [
       {
@@ -141,8 +142,11 @@
         "device_start": 0,
         "sync_mode": "blend",
         "blend": 0.5,
-        "tv_role": "top",
-        "extends_strip_id": ""
+        "tv_role": "none",
+        "extends_strip_id": "strip-5",
+        "extension_mode": "soft_spill",
+        "extension_strength": 0.45,
+        "extension_softness": 0.65
       },
       {
         "id": "left-strip",
@@ -159,7 +163,10 @@
         "sync_mode": "spatial",
         "blend": 0.5,
         "tv_role": "none",
-        "extends_strip_id": "front-strip"
+        "extends_strip_id": "front-strip",
+        "extension_mode": "soft_spill",
+        "extension_strength": 0.45,
+        "extension_softness": 0.65
       },
       {
         "id": "rear-strip",
@@ -173,10 +180,13 @@
         "direction": "forward",
         "device_id": "main",
         "device_start": 400,
-        "sync_mode": "blend",
+        "sync_mode": "tv_image",
         "blend": 0.5,
         "tv_role": "none",
-        "extends_strip_id": "front-strip"
+        "extends_strip_id": "",
+        "extension_mode": "effects_only",
+        "extension_strength": 0.45,
+        "extension_softness": 0.65
       },
       {
         "id": "right-strip",
@@ -193,7 +203,10 @@
         "sync_mode": "spatial",
         "blend": 0.5,
         "tv_role": "none",
-        "extends_strip_id": "front-strip"
+        "extends_strip_id": "front-strip",
+        "extension_mode": "soft_spill",
+        "extension_strength": 0.45,
+        "extension_softness": 0.65
       },
       {
         "id": "strip-5",
@@ -204,13 +217,16 @@
         "end_u": 7.901422021511294,
         "end_v": 7.5000380232348265,
         "led_count": 90,
-        "direction": "forward",
+        "direction": "reverse",
         "device_id": "main",
         "device_start": 800,
         "sync_mode": "tv_image",
         "blend": 0.5,
         "tv_role": "top",
-        "extends_strip_id": ""
+        "extends_strip_id": "",
+        "extension_mode": "soft_spill",
+        "extension_strength": 0.45,
+        "extension_softness": 0.65
       },
       {
         "id": "strip-5-copy",
@@ -221,13 +237,16 @@
         "end_u": 7.906221488870774,
         "end_v": 4.5040270062929,
         "led_count": 90,
-        "direction": "forward",
+        "direction": "reverse",
         "device_id": "main",
         "device_start": 890,
         "sync_mode": "tv_image",
         "blend": 0.5,
         "tv_role": "bottom",
-        "extends_strip_id": ""
+        "extends_strip_id": "",
+        "extension_mode": "soft_spill",
+        "extension_strength": 0.45,
+        "extension_softness": 0.65
       },
       {
         "id": "strip-5-copy-copy",
@@ -243,8 +262,11 @@
         "device_start": 980,
         "sync_mode": "tv_image",
         "blend": 0.5,
-        "tv_role": "left",
-        "extends_strip_id": ""
+        "tv_role": "right",
+        "extends_strip_id": "",
+        "extension_mode": "soft_spill",
+        "extension_strength": 0.45,
+        "extension_softness": 0.65
       },
       {
         "id": "strip-5-copy-copy-copy",
@@ -260,25 +282,31 @@
         "device_start": 1040,
         "sync_mode": "tv_image",
         "blend": 0.5,
-        "tv_role": "right",
-        "extends_strip_id": ""
+        "tv_role": "left",
+        "extends_strip_id": "",
+        "extension_mode": "soft_spill",
+        "extension_strength": 0.45,
+        "extension_softness": 0.65
       },
       {
         "id": "strip-9",
         "name": "Strip 9",
         "wall": "front",
-        "start_u": 3.2917517702775467,
-        "start_v": 3.958286484814894,
-        "end_u": 7.925757175722724,
-        "end_v": 3.9701998620728163,
+        "start_u": 3.312343409890182,
+        "start_v": 3.96838285670353,
+        "end_u": 7.94634881533536,
+        "end_v": 3.980296233961452,
         "led_count": 60,
         "direction": "reverse",
         "device_id": "main",
         "device_start": 1100,
         "sync_mode": "blend",
         "blend": 0.5,
-        "tv_role": "bottom",
-        "extends_strip_id": ""
+        "tv_role": "none",
+        "extends_strip_id": "strip-5-copy",
+        "extension_mode": "soft_spill",
+        "extension_strength": 0.45,
+        "extension_softness": 0.65
       },
       {
         "id": "strip-10",
@@ -295,7 +323,10 @@
         "sync_mode": "spatial",
         "blend": 0.5,
         "tv_role": "none",
-        "extends_strip_id": "strip-9"
+        "extends_strip_id": "strip-9",
+        "extension_mode": "soft_spill",
+        "extension_strength": 0.45,
+        "extension_softness": 0.65
       },
       {
         "id": "strip-11",
@@ -312,7 +343,10 @@
         "sync_mode": "spatial",
         "blend": 0.5,
         "tv_role": "none",
-        "extends_strip_id": "strip-9"
+        "extends_strip_id": "strip-9",
+        "extension_mode": "soft_spill",
+        "extension_strength": 0.45,
+        "extension_softness": 0.65
       }
     ]
   },

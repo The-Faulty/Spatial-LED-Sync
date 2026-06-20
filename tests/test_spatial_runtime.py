@@ -7,7 +7,7 @@ import numpy as np
 
 from config import EngineConfig
 from event_detector import LightEvent
-from spatial_config import default_spatial_dict, validate_spatial_config
+from spatial_config import parse_spatial_config, spatial_config_to_dict, default_spatial_dict, validate_spatial_config
 from spatial_renderer import VectorizedSpatialRenderer
 from spatial_topology import SpatialRoomTopology
 from wled_output import WLEDOutput
@@ -17,7 +17,14 @@ def spatial_config() -> dict:
     spatial = default_spatial_dict(12)
     spatial["enabled"] = True
     spatial["room"] = {"width": 4.0, "depth": 3.0, "height": 2.4, "unit": "m"}
-    spatial["tv"] = {"wall": "front", "center_u": 2.0, "center_v": 1.2, "width": 1.4, "height": 0.8}
+    spatial["tv"] = {
+        "wall": "front",
+        "center_u": 2.0,
+        "center_v": 1.2,
+        "width": 1.4,
+        "height": 0.8,
+        "mirror_horizontal": False,
+    }
     spatial["devices"] = [
         {"id": "left", "name": "Left", "ip": "192.0.2.10", "led_count": 8, "segment_id": None, "enabled": True},
         {"id": "right", "name": "Right", "ip": "192.0.2.11", "led_count": 8, "segment_id": 1, "enabled": True},
@@ -179,6 +186,48 @@ class SpatialRuntimeTests(unittest.TestCase):
         self.assertGreater(float(colors[3, 0]), 0.95)
         self.assertLess(float(colors[5, 0]), 0.05)
 
+    def test_mirrored_tv_sampling_matches_mirrored_preview_orientation(self) -> None:
+        spatial = spatial_config()
+        spatial["tv"]["mirror_horizontal"] = True
+        spatial["strips"] = [
+            dict(
+                spatial["strips"][0],
+                id="top",
+                start_u=1.3,
+                end_u=2.7,
+                start_v=1.65,
+                end_v=1.65,
+                led_count=3,
+                direction="forward",
+                tv_role="top",
+                sync_mode="tv_image",
+                device_start=0,
+            ),
+            dict(
+                spatial["strips"][0],
+                id="bottom",
+                start_u=1.3,
+                end_u=2.7,
+                start_v=0.75,
+                end_v=0.75,
+                led_count=3,
+                direction="forward",
+                tv_role="bottom",
+                sync_mode="tv_image",
+                device_start=3,
+            ),
+        ]
+        config = EngineConfig(total_leds=6, spatial=spatial)
+        topology = SpatialRoomTopology(config)
+        frame = np.zeros((6, 5, 3), dtype=np.uint8)
+        frame[0, :, 2] = np.array([0, 64, 128, 192, 255], dtype=np.uint8)
+        frame[-1, :, 2] = np.array([0, 64, 128, 192, 255], dtype=np.uint8)
+        colors = topology.tv_sample_colors(frame)
+        self.assertGreater(float(colors[0, 0]), 0.95)
+        self.assertLess(float(colors[2, 0]), 0.05)
+        self.assertGreater(float(colors[3, 0]), 0.95)
+        self.assertLess(float(colors[5, 0]), 0.05)
+
     def test_left_and_right_tv_roles_sample_vertical_edges(self) -> None:
         spatial = spatial_config()
         side_strip = dict(
@@ -256,6 +305,9 @@ class SpatialRuntimeTests(unittest.TestCase):
             id="extension",
             tv_role="none",
             extends_strip_id="parent",
+            extension_mode="edge_reach",
+            extension_strength=1.0,
+            extension_softness=0.0,
             device_id="right",
             device_start=0,
         )
@@ -269,6 +321,97 @@ class SpatialRuntimeTests(unittest.TestCase):
         self.assertGreater(float(colors[2, 0]), 0.95)
         self.assertLess(float(colors[3, 0]), 0.05)
         self.assertGreater(float(colors[5, 0]), 0.95)
+
+    def test_extension_defaults_are_added_to_old_configs(self) -> None:
+        spatial = spatial_config()
+        spatial["tv"].pop("mirror_horizontal", None)
+        for strip in spatial["strips"]:
+            strip.pop("extension_mode", None)
+            strip.pop("extension_strength", None)
+            strip.pop("extension_softness", None)
+        parsed = parse_spatial_config(spatial, 8)
+        saved = spatial_config_to_dict(parsed)
+        self.assertTrue(saved["tv"]["mirror_horizontal"])
+        self.assertEqual(saved["strips"][0]["extension_mode"], "soft_spill")
+        self.assertEqual(saved["strips"][0]["extension_strength"], 0.45)
+        self.assertEqual(saved["strips"][0]["extension_softness"], 0.65)
+
+    def test_soft_spill_extension_is_lower_strength_than_parent(self) -> None:
+        spatial = spatial_config()
+        parent = dict(
+            spatial["strips"][0],
+            id="parent",
+            start_u=1.3,
+            end_u=2.7,
+            led_count=3,
+            tv_role="top",
+            sync_mode="tv_image",
+            device_id="left",
+            device_start=0,
+        )
+        extension = dict(
+            parent,
+            id="soft-extension",
+            tv_role="none",
+            extends_strip_id="parent",
+            sync_mode="tv_image",
+            extension_mode="soft_spill",
+            extension_strength=0.45,
+            extension_softness=0.65,
+            device_id="right",
+            device_start=0,
+        )
+        spatial["strips"] = [parent, extension]
+        config = EngineConfig(total_leds=6, spatial=spatial)
+        topology = SpatialRoomTopology(config)
+        frame = np.zeros((5, 5, 3), dtype=np.uint8)
+        frame[0, :, 2] = 255
+        colors = topology.tv_sample_colors(frame)
+        self.assertGreater(float(colors[:3, 0].max()), 0.95)
+        self.assertLess(float(colors[3:, 0].max()), 0.50)
+        self.assertGreater(float(colors[3:, 0].max()), 0.30)
+
+    def test_edge_reach_extension_gates_by_distance_from_tv_edge(self) -> None:
+        spatial = spatial_config()
+        parent = dict(
+            spatial["strips"][0],
+            id="parent",
+            start_u=1.3,
+            end_u=2.7,
+            start_v=0.8,
+            end_v=0.8,
+            led_count=3,
+            tv_role="bottom",
+            sync_mode="tv_image",
+            device_id="left",
+            device_start=0,
+        )
+        extension = dict(
+            parent,
+            id="edge-reach-extension",
+            tv_role="none",
+            extends_strip_id="parent",
+            start_u=1.3,
+            end_u=1.3,
+            start_v=0.8,
+            end_v=0.1,
+            sync_mode="tv_image",
+            extension_mode="edge_reach",
+            extension_strength=1.0,
+            extension_softness=0.65,
+            device_id="right",
+            device_start=0,
+        )
+        spatial["strips"] = [parent, extension]
+        config = EngineConfig(total_leds=6, spatial=spatial)
+        topology = SpatialRoomTopology(config)
+        frame = np.zeros((5, 5, 3), dtype=np.uint8)
+        frame[-1, :, 2] = 128
+        colors = topology.tv_sample_colors(frame)
+        near = float(colors[3, 0])
+        far = float(colors[5, 0])
+        self.assertGreater(near, 0.45)
+        self.assertLess(far, near * 0.25)
 
     def test_spatial_extension_inherits_role_but_does_not_sample_tv_image(self) -> None:
         spatial = spatial_config()
@@ -289,6 +432,7 @@ class SpatialRuntimeTests(unittest.TestCase):
             tv_role="none",
             extends_strip_id="parent",
             sync_mode="spatial",
+            extension_mode="effects_only",
             device_id="right",
             device_start=0,
         )
@@ -322,6 +466,9 @@ class SpatialRuntimeTests(unittest.TestCase):
             extends_strip_id="parent",
             sync_mode="blend",
             blend=0.5,
+            extension_mode="soft_spill",
+            extension_strength=0.45,
+            extension_softness=0.65,
             device_id="right",
             device_start=0,
         )
@@ -334,7 +481,40 @@ class SpatialRuntimeTests(unittest.TestCase):
         renderer.set_tv_frame(frame)
         leds = renderer.step(0.1)
         self.assertGreater(int(leds[:3, 0].max()), 240)
-        self.assertGreater(int(leds[3:, 0].max()), 120)
+        self.assertGreater(int(leds[3:, 0].max()), 40)
+        self.assertLess(int(leds[3:, 0].max()), 120)
+
+    def test_effects_only_extension_with_tv_image_sync_receives_no_tv_color(self) -> None:
+        spatial = spatial_config()
+        parent = dict(
+            spatial["strips"][0],
+            id="parent",
+            start_u=1.3,
+            end_u=2.7,
+            led_count=3,
+            tv_role="top",
+            sync_mode="tv_image",
+            device_id="left",
+            device_start=0,
+        )
+        extension = dict(
+            parent,
+            id="effects-only-extension",
+            tv_role="none",
+            extends_strip_id="parent",
+            sync_mode="tv_image",
+            extension_mode="effects_only",
+            device_id="right",
+            device_start=0,
+        )
+        spatial["strips"] = [parent, extension]
+        config = EngineConfig(total_leds=6, spatial=spatial)
+        topology = SpatialRoomTopology(config)
+        frame = np.zeros((5, 5, 3), dtype=np.uint8)
+        frame[0, :, 2] = 255
+        colors = topology.tv_sample_colors(frame)
+        self.assertGreater(float(colors[:3, 0].max()), 0.95)
+        self.assertTrue(np.allclose(colors[3:], 0.0))
 
     def test_invalid_extension_parent_is_rejected(self) -> None:
         spatial = spatial_config()

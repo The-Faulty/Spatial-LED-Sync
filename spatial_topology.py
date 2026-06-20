@@ -30,6 +30,7 @@ class SpatialRoomTopology:
         self.strip_ids: list[str] = []
         self.sync_modes: list[str] = []
         self.effective_tv_roles: list[str] = []
+        self.extension_modes: list[str] = []
         self.device_ids: list[str] = []
         self.device_led_indices = np.zeros(self.total, dtype=np.int32)
         self.strip_ranges: dict[str, tuple[int, int]] = {}
@@ -170,10 +171,15 @@ class SpatialRoomTopology:
             role = self.effective_tv_role_for_strip(strip.id)
             if role == "none" or strip.sync_mode not in {"tv_image", "blend"}:
                 continue
+            if strip.extends_strip_id.strip() and strip.extension_mode == "effects_only":
+                continue
             start, end = self.strip_ranges.get(strip.id, (0, 0))
             idx = np.arange(start, end, dtype=np.int32)
             if idx.size:
-                colors[idx] = self._sample_tv_role(frame, idx, role)
+                sampled = self._sample_tv_role(frame, idx, role)
+                if strip.extends_strip_id.strip():
+                    sampled = self._apply_extension_mode(sampled, idx, role, strip)
+                colors[idx] = sampled
 
         roles = np.array(self.effective_tv_roles, dtype=object)
         tv_capable = np.array([mode in {"tv_image", "blend"} for mode in self.sync_modes], dtype=bool)
@@ -222,6 +228,7 @@ class SpatialRoomTopology:
             self.strip_ids.append(strip.id)
             self.sync_modes.append(strip.sync_mode)
             self.effective_tv_roles.append(self.effective_tv_role_for_strip(strip.id))
+            self.extension_modes.append(strip.extension_mode)
             self.device_ids.append(strip.device_id)
             self.device_led_indices[idx] = strip.device_start + offset
             self.wall_ranges[strip.wall].append(idx)
@@ -280,8 +287,11 @@ class SpatialRoomTopology:
 
     def _sample_tv_role(self, frame: np.ndarray, idx: np.ndarray, role: str) -> np.ndarray:
         height, width = frame.shape[:2]
+        sample_role = self._mirrored_sample_role(role)
         if role in {"top", "bottom"}:
             progress = self._tv_edge_progress(idx, role)
+            if self.spatial.tv.mirror_horizontal:
+                progress = 1.0 - progress
             xs = np.clip(np.rint(progress * (width - 1)).astype(np.int32), 0, width - 1)
             edge_h = max(1, int(round(height * 0.04)))
             band = frame[:edge_h, :] if role == "top" else frame[height - edge_h :, :]
@@ -290,9 +300,66 @@ class SpatialRoomTopology:
             progress = self._tv_edge_progress(idx, role)
             ys = np.clip(np.rint((1.0 - progress) * (height - 1)).astype(np.int32), 0, height - 1)
             edge_w = max(1, int(round(width * 0.04)))
-            band = frame[:, :edge_w] if role == "left" else frame[:, width - edge_w :]
+            band = frame[:, :edge_w] if sample_role == "left" else frame[:, width - edge_w :]
             sampled = band[ys, :].mean(axis=1)
         return sampled
+
+    def _mirrored_sample_role(self, role: str) -> str:
+        if not self.spatial.tv.mirror_horizontal:
+            return role
+        if role == "left":
+            return "right"
+        if role == "right":
+            return "left"
+        return role
+
+    def _apply_extension_mode(self, colors: np.ndarray, idx: np.ndarray, role: str, strip: SpatialStrip) -> np.ndarray:
+        strength = float(np.clip(strip.extension_strength, 0.0, 1.0))
+        softness = float(np.clip(strip.extension_softness, 0.0, 1.0))
+        if strip.sync_mode == "spatial" or strip.extension_mode == "effects_only":
+            return np.zeros_like(colors)
+        if strip.extension_mode == "edge_reach":
+            distances = self._extension_distance_from_tv_edge(idx, role).reshape(-1, 1)
+            intensity = np.max(colors, axis=1, keepdims=True)
+            gate = np.power(np.clip(intensity, 0.0, 1.0), distances * (2.5 + softness * 2.0))
+            return np.clip(colors * gate * strength, 0.0, 1.0)
+
+        softened = self._smooth_strip_colors(colors, softness)
+        luminance = (
+            softened[:, 0:1] * 0.2126
+            + softened[:, 1:2] * 0.7152
+            + softened[:, 2:3] * 0.0722
+        )
+        desaturate = softness * 0.35
+        softened = softened * (1.0 - desaturate) + luminance * desaturate
+        return np.clip(softened * strength, 0.0, 1.0)
+
+    def _smooth_strip_colors(self, colors: np.ndarray, softness: float) -> np.ndarray:
+        if colors.shape[0] <= 1 or softness <= 0.0:
+            return colors
+        smoothed = colors.copy()
+        passes = max(1, int(round(softness * 5.0)))
+        for _ in range(passes):
+            padded = np.pad(smoothed, ((1, 1), (0, 0)), mode="edge")
+            smoothed = padded[:-2] * 0.25 + padded[1:-1] * 0.5 + padded[2:] * 0.25
+        return smoothed
+
+    def _extension_distance_from_tv_edge(self, idx: np.ndarray, role: str) -> np.ndarray:
+        tv = self.spatial.tv
+        progress = self._tv_edge_progress(idx, role)
+        if role in {"top", "bottom"}:
+            edge_u = tv.center_u - tv.width / 2.0 + progress * tv.width
+            edge_v = np.full_like(edge_u, tv.center_v + tv.height / 2.0 if role == "top" else tv.center_v - tv.height / 2.0)
+        else:
+            edge_u = np.full_like(progress, tv.center_u - tv.width / 2.0 if role == "left" else tv.center_u + tv.width / 2.0)
+            edge_v = tv.center_v - tv.height / 2.0 + progress * tv.height
+        edge_points = np.array([self.wall_point(tv.wall, float(u), float(v)) for u, v in zip(edge_u, edge_v)], dtype=np.float32)
+        distances = np.linalg.norm(self.positions[idx] - edge_points, axis=1)
+        if distances.size == 0:
+            return distances
+        min_distance = float(np.min(distances))
+        span = max(0.001, float(np.max(distances) - min_distance))
+        return np.clip((distances - min_distance) / span, 0.0, 1.0).astype(np.float32)
 
     def _tv_edge_progress(self, idx: np.ndarray, role: str) -> np.ndarray:
         tv = self.spatial.tv
