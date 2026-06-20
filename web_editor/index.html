@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>3D Room Visualizer</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <section class="viewport">
+        <canvas id="scene"></canvas>
+      </section>
+      <aside class="panel">
+        <header>
+          <h1>3D Room Visualizer</h1>
+          <div id="status">Loading</div>
+        </header>
+
+        <fieldset>
+          <legend>Live Preview</legend>
+          <div class="actions">
+            <button id="start-preview" type="button">Start Preview</button>
+            <button id="stop-preview" type="button">Stop Preview</button>
+          </div>
+          <div id="preview-status" class="status-line">Preview stopped</div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Room</legend>
+          <label>Width <input id="room-width" type="number" min="0.1" step="0.1" /></label>
+          <label>Depth <input id="room-depth" type="number" min="0.1" step="0.1" /></label>
+          <label>Height <input id="room-height" type="number" min="0.1" step="0.1" /></label>
+        </fieldset>
+
+        <fieldset>
+          <legend>TV</legend>
+          <label>Wall
+            <select id="tv-wall">
+              <option>front</option>
+              <option>left</option>
+              <option>rear</option>
+              <option>right</option>
+            </select>
+          </label>
+          <label>Center U <input id="tv-u" type="number" step="0.05" /></label>
+          <label>Center V <input id="tv-v" type="number" step="0.05" /></label>
+          <label>Width <input id="tv-width" type="number" min="0.1" step="0.05" /></label>
+          <label>Height <input id="tv-height" type="number" min="0.1" step="0.05" /></label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Devices</legend>
+          <textarea id="devices-json" spellcheck="false"></textarea>
+        </fieldset>
+
+        <fieldset>
+          <legend>Strip Editor</legend>
+          <label>Selected
+            <select id="strip-select"></select>
+          </label>
+          <label>Name <input id="strip-name" type="text" /></label>
+          <label>Wall
+            <select id="strip-wall">
+              <option>front</option>
+              <option>left</option>
+              <option>rear</option>
+              <option>right</option>
+            </select>
+          </label>
+          <label>Start U <input id="strip-start-u" type="number" step="0.05" /></label>
+          <label>Start V <input id="strip-start-v" type="number" step="0.05" /></label>
+          <label>End U <input id="strip-end-u" type="number" step="0.05" /></label>
+          <label>End V <input id="strip-end-v" type="number" step="0.05" /></label>
+          <label>LED Count <input id="strip-led-count" type="number" min="1" step="1" /></label>
+          <label>Direction
+            <select id="strip-direction">
+              <option value="forward">forward</option>
+              <option value="reverse">reverse</option>
+            </select>
+          </label>
+          <label>Device
+            <select id="strip-device"></select>
+          </label>
+          <label>Device Start <input id="strip-device-start" type="number" min="0" step="1" /></label>
+          <label>Sync
+            <select id="strip-sync-mode">
+              <option value="spatial">spatial</option>
+              <option value="tv_image">tv_image</option>
+              <option value="blend">blend</option>
+            </select>
+          </label>
+          <label>TV Side
+            <select id="strip-tv-role">
+              <option value="none">none</option>
+              <option value="top">top</option>
+              <option value="bottom">bottom</option>
+              <option value="left">left</option>
+              <option value="right">right</option>
+            </select>
+          </label>
+          <label>Extension Of
+            <select id="strip-extends"></select>
+          </label>
+          <label>Blend <input id="strip-blend" type="range" min="0" max="1" step="0.05" /></label>
+          <div class="nudge-grid">
+            <button id="strip-nudge-left" type="button">U -</button>
+            <button id="strip-nudge-up" type="button">V +</button>
+            <button id="strip-nudge-down" type="button">V -</button>
+            <button id="strip-nudge-right" type="button">U +</button>
+          </div>
+          <div class="actions">
+            <button id="deselect-strip" type="button">Deselect</button>
+            <button id="duplicate-strip" type="button">Duplicate</button>
+            <button id="delete-strip" type="button" class="danger">Delete</button>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Advanced Strips JSON</legend>
+          <textarea id="strips-json" spellcheck="false"></textarea>
+        </fieldset>
+
+        <div class="actions">
+          <button id="add-strip">Add Strip</button>
+          <button id="save">Save Config</button>
+        </div>
+      </aside>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
