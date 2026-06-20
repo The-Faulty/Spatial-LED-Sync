@@ -1029,7 +1029,10 @@ async function pollPreviewStatus() {
       requestDraw();
     }
     fetchPreviewFrame(Number(payload.frame_revision || 0));
-    const source = payload.hyperhdr_connected ? "HyperHDR connected" : "HyperHDR reconnecting";
+    const waitingForFrames = Number(payload.frame_revision || 0) === 0;
+    const source = waitingForFrames
+      ? "Waiting for frames"
+      : (payload.hyperhdr_connected ? "HyperHDR connected" : "HyperHDR reconnecting");
     fields.previewStatus.textContent = previewRunning
       ? `Preview running | ${source} | FPS ${Number(payload.fps || 0).toFixed(1)} | Waves ${payload.active_waves || 0}`
       : "Preview stopped";

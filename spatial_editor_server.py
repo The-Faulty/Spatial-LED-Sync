@@ -123,10 +123,10 @@ class PreviewRuntimeManager:
                 snapshot = runtime.step_once(timeout=frame_interval)
                 with self.lock:
                     self.last_snapshot = snapshot
-                    if snapshot.leds is not None:
-                        self.led_revision += 1
                     if snapshot.frame is not None:
                         self.frame_revision += 1
+                        if snapshot.leds is not None:
+                            self.led_revision += 1
             except Exception as exc:
                 with self.lock:
                     self.last_error = str(exc)

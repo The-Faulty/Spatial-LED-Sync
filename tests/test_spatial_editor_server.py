@@ -196,6 +196,27 @@ class EditorServerCase(unittest.TestCase):
         stopped = self.post_path("/api/preview/stop")
         self.assertFalse(stopped["running"])
 
+    def test_live_preview_does_not_publish_black_led_revision_before_first_frame(self) -> None:
+        raw = json.loads(self.config_path.read_text(encoding="utf-8"))
+        raw["simulate_input"] = False
+        raw["hyperhdr_input_mode"] = "websocket"
+        raw["hyperhdr_ws_port"] = 9
+        self.config_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+
+        preview = self.get_json("/api/preview-colors")
+        self.assertTrue(preview.get("colors"))
+
+        started = self.post_path("/api/preview/start")
+        self.assertTrue(started["running"], started)
+        time.sleep(0.3)
+        status = self.get_json("/api/preview/status")
+        self.assertTrue(status.get("running"))
+        self.assertEqual(status.get("frame_revision"), 0)
+        self.assertEqual(status.get("led_revision"), 0)
+        self.assertEqual(status.get("led_count"), 6)
+        self.assertEqual(len(status.get("leds_flat", [])), 18)
+        self.assertEqual(max(status.get("leds_flat", [0])), 0)
+
     def test_preview_frame_endpoint_returns_latest_processed_frame(self) -> None:
         frame = np.zeros((8, 12, 3), dtype=np.uint8)
         frame[:, :, 1] = 180
