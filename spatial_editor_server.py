@@ -84,9 +84,13 @@ class PreviewRuntimeManager:
                 leds = snapshot.leds.astype(np.uint8, copy=False)
                 leds_flat = leds.reshape(-1).astype(int).tolist()
                 led_count = int(leds.shape[0])
+                led_max = int(leds.max()) if leds.size else 0
+                lit_led_count = int(np.count_nonzero(np.max(leds, axis=1))) if leds.size else 0
             else:
                 leds_flat = []
                 led_count = 0
+                led_max = 0
+                lit_led_count = 0
             return {
                 "running": bool(self.runtime and self.runtime.running),
                 "fps": snapshot.fps,
@@ -96,6 +100,8 @@ class PreviewRuntimeManager:
                 "wled_enabled": False,
                 "last_error": snapshot.last_error or self.last_error,
                 "led_count": led_count,
+                "lit_led_count": lit_led_count,
+                "led_max": led_max,
                 "led_revision": self.led_revision,
                 "frame_revision": self.frame_revision,
                 "leds_flat": leds_flat,
@@ -248,6 +254,7 @@ class SpatialEditorHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", content_type or "application/octet-stream")
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
 

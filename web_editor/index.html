@@ -9,7 +9,13 @@
   <body>
     <main class="app">
       <section class="viewport">
+        <div class="view-toolbar" aria-label="View mode">
+          <button id="view-2d" type="button" class="active">2D Editor</button>
+          <button id="view-3d" type="button">3D Light Preview</button>
+        </div>
         <canvas id="scene"></canvas>
+        <canvas id="scene3d" hidden></canvas>
+        <div id="webgl-fallback" hidden>3D preview is unavailable because WebGL rendering is disabled or unsupported.</div>
       </section>
       <aside class="panel">
         <header>
@@ -136,6 +142,13 @@
         </div>
       </aside>
     </main>
-    <script type="module" src="/app.js"></script>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "/vendor/three.module.js?v=three165-live10"
+        }
+      }
+    </script>
+    <script type="module" src="/app.js?v=three165-live10"></script>
   </body>
 </html>

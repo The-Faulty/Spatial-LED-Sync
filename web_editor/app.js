@@ -1,6 +1,10 @@
+import { createLightPreview3d } from "./scene3d.js?v=three165-live10";
+
 const statusEl = document.querySelector("#status");
 const canvas = document.querySelector("#scene");
 const ctx = canvas.getContext("2d");
+const canvas3d = document.querySelector("#scene3d");
+const webglFallback = document.querySelector("#webgl-fallback");
 
 let config = null;
 let spatial = null;
@@ -26,6 +30,7 @@ let previewFrameRequestRevision = 0;
 let previewFrameLoading = false;
 let previewImage = null;
 let emptyDragStart = null;
+let activeView = "2d";
 
 const fields = {
   roomWidth: document.querySelector("#room-width"),
@@ -39,6 +44,8 @@ const fields = {
   startPreview: document.querySelector("#start-preview"),
   stopPreview: document.querySelector("#stop-preview"),
   previewStatus: document.querySelector("#preview-status"),
+  view2d: document.querySelector("#view-2d"),
+  view3d: document.querySelector("#view-3d"),
   devicesJson: document.querySelector("#devices-json"),
   stripsJson: document.querySelector("#strips-json"),
   stripSelect: document.querySelector("#strip-select"),
@@ -70,6 +77,8 @@ const fields = {
   save: document.querySelector("#save"),
 };
 
+const lightPreview3d = createLightPreview3d({ canvas: canvas3d, fallback: webglFallback });
+
 async function loadConfig() {
   statusEl.textContent = "Loading config";
   const response = await fetch("/api/config");
@@ -78,6 +87,7 @@ async function loadConfig() {
   spatial = payload.spatial;
   bindForm();
   await loadPreviewColors();
+  syncLightPreview3d();
   renderSpatial();
   statusEl.textContent = "Loaded";
 }
@@ -86,6 +96,27 @@ async function loadPreviewColors() {
   const response = await fetch("/api/preview-colors");
   const payload = await response.json();
   previewColors = payload.colors || [];
+  syncLightPreview3d();
+}
+
+function syncLightPreview3d() {
+  lightPreview3d.setState({ spatial, previewColors, previewImage });
+}
+
+function setViewMode(mode) {
+  activeView = mode;
+  const is3d = mode === "3d";
+  canvas.hidden = is3d;
+  canvas3d.hidden = !is3d;
+  fields.view2d.classList.toggle("active", !is3d);
+  fields.view3d.classList.toggle("active", is3d);
+  lightPreview3d.setActive(is3d);
+  if (is3d) {
+    syncLightPreview3d();
+    lightPreview3d.render();
+  } else {
+    requestDraw();
+  }
 }
 
 function bindForm() {
@@ -119,6 +150,7 @@ function refreshEditorState({ syncDevicesJson = true, syncStripsJson = true, red
   if (syncDevicesJson) syncDevicesJsonText();
   if (syncStripsJson) syncStripsJsonText();
   bindStripEditor();
+  syncLightPreview3d();
   if (redraw) requestDraw();
 }
 
@@ -922,6 +954,7 @@ async function saveSpatialConfig({ silent = false } = {}) {
   spatial = config.spatial;
   bindForm();
   await loadPreviewColors();
+  syncLightPreview3d();
   requestDraw();
   statusEl.textContent = silent ? "Auto-saved" : "Saved";
   if (saveAgain) {
@@ -972,6 +1005,7 @@ async function stopPreview() {
   previewFrameRequestRevision = 0;
   lastLedRevision = 0;
   await loadPreviewColors();
+  syncLightPreview3d();
   requestDraw();
 }
 
@@ -1002,6 +1036,7 @@ function fetchPreviewFrame(revision) {
     previewImage = image;
     previewFrameRevision = revision;
     previewFrameLoading = false;
+    syncLightPreview3d();
     requestDraw();
   };
   image.onerror = () => {
@@ -1023,9 +1058,11 @@ async function pollPreviewStatus() {
     ) {
       previewColors = unpackLedColors(payload.leds_flat, Number(payload.led_count || 0));
       lastLedRevision = Number(payload.led_revision || 0);
+      syncLightPreview3d();
       requestDraw();
     } else if (Array.isArray(payload.leds) && payload.leds.length) {
       previewColors = payload.leds;
+      syncLightPreview3d();
       requestDraw();
     }
     fetchPreviewFrame(Number(payload.frame_revision || 0));
@@ -1034,7 +1071,7 @@ async function pollPreviewStatus() {
       ? "Waiting for frames"
       : (payload.hyperhdr_connected ? "HyperHDR connected" : "HyperHDR reconnecting");
     fields.previewStatus.textContent = previewRunning
-      ? `Preview running | ${source} | FPS ${Number(payload.fps || 0).toFixed(1)} | Waves ${payload.active_waves || 0}`
+      ? `Preview running | ${source} | FPS ${Number(payload.fps || 0).toFixed(1)} | LED rev ${Number(payload.led_revision || 0)} | Frame rev ${Number(payload.frame_revision || 0)} | Lit ${Number(payload.lit_led_count || 0)}/${Number(payload.led_count || 0)} | Max LED ${Number(payload.led_max || 0)} | Waves ${payload.active_waves || 0}`
       : "Preview stopped";
   } catch (error) {
     fields.previewStatus.textContent = `Preview error: ${error}`;
@@ -1128,7 +1165,12 @@ fields.addStrip.addEventListener("click", addStrip);
 fields.save.addEventListener("click", saveConfig);
 fields.startPreview.addEventListener("click", startPreview);
 fields.stopPreview.addEventListener("click", stopPreview);
-window.addEventListener("resize", requestDraw);
+fields.view2d.addEventListener("click", () => setViewMode("2d"));
+fields.view3d.addEventListener("click", () => setViewMode("3d"));
+window.addEventListener("resize", () => {
+  requestDraw();
+  if (activeView === "3d") lightPreview3d.render();
+});
 
 canvas.addEventListener("pointerdown", (event) => {
   const rect = canvas.getBoundingClientRect();
