@@ -168,6 +168,7 @@ class PreviewRuntimeManager:
                 "active_effect_counts": active_effect_counts,
                 "triggered_effects": triggered,
                 "candidate_events": snapshot.candidate_events,
+                "wled_skip_count": snapshot.wled_skip_count,
                 "enabled_effects": enabled_effects,
                 "effect_sensitivity": effect_sensitivity,
                 "front_ambient_coverage": front_ambient_coverage,
@@ -414,6 +415,8 @@ class SpatialEditorHandler(BaseHTTPRequestHandler):
                 renderer._front_ambient_led_cache = None
             if hasattr(renderer, "_front_ambient_led_set_cache"):
                 renderer._front_ambient_led_set_cache = None
+            if hasattr(renderer, "_front_ambient_reserved_mask_cache"):
+                renderer._front_ambient_reserved_mask_cache = None
 
     def _send_preview_colors(self) -> None:
         config = EngineConfig.load(self.config_path)

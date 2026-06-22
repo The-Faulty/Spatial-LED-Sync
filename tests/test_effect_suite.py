@@ -48,6 +48,26 @@ class EffectSuiteTests(unittest.TestCase):
         self.assertEqual(config.front_ambient_coverage, 1.0)
         self.assertEqual(config.ambient_side_spill_base_intensity, 0.45)
         self.assertEqual(config.ambient_side_spill_boost_intensity, 1.0)
+        self.assertEqual(config.wled_protocol, "ddp")
+        self.assertEqual(config.wled_udp_port, 4048)
+        self.assertEqual(config.motion_analysis_fps, 15)
+
+    def test_invalid_wled_realtime_settings_fail_validation(self) -> None:
+        config = EngineConfig()
+        config.wled_protocol = "http"
+        config.wled_udp_port = 70000
+        config.motion_analysis_fps = 0
+        errors = config.validate()
+        self.assertTrue(any("wled_protocol" in error for error in errors))
+        self.assertTrue(any("wled_udp_port" in error for error in errors))
+        self.assertTrue(any("motion_analysis_fps" in error for error in errors))
+
+    def test_analysis_cadence_limits_motion_detection_rate(self) -> None:
+        engine = HeadlessEffectsEngine(EngineConfig(target_fps=30, motion_analysis_fps=15), unittest.mock.Mock())
+        self.assertTrue(engine._analysis_due())
+        self.assertFalse(engine._analysis_due())
+        engine.last_analysis_time -= 1.0
+        self.assertTrue(engine._analysis_due())
 
     def test_invalid_effect_sensitivity_fails_validation(self) -> None:
         config = EngineConfig()
@@ -391,6 +411,22 @@ class EffectSuiteTests(unittest.TestCase):
             leds = engine.step(0.05)
             self.assertGreater(int(np.min(np.max(leds, axis=1))), 5, kind)
 
+    def test_legacy_wave_render_keeps_front_ambient_reserved_leds_dark(self) -> None:
+        config = EngineConfig(total_leds=240, brightness=1.0, gamma=1.0, color_smoothing=0.0, lighting_mode="front_ambient")
+        engine = WaveEngine(config, RoomTopology(config))
+        reserved = engine._front_ambient_leds()
+        engine.add_events([self.event("shockwave", 0.95, width=1.0)])
+        leds = engine.step(0.05)
+        self.assertTrue(reserved)
+        self.assertEqual(int(leds[reserved].max()), 0)
+        self.assertGreater(int(leds.max()), 0)
+
+    def test_legacy_wave_reserved_mask_cache_matches_led_list(self) -> None:
+        config = EngineConfig(total_leds=240, lighting_mode="front_ambient", front_ambient_coverage=0.5)
+        engine = WaveEngine(config, RoomTopology(config))
+        mask = engine._front_ambient_reserved_mask()
+        self.assertEqual(set(np.nonzero(mask)[0].tolist()), set(engine._front_ambient_leds()))
+
     def test_headless_engine_snapshot_reports_mixed_events(self) -> None:
         class Queue:
             def qsize(self) -> int:
@@ -439,6 +475,7 @@ class EffectSuiteTests(unittest.TestCase):
 
         class WLED:
             enabled = False
+            skip_count = 3
 
             def send(self, leds):
                 return False
@@ -460,6 +497,7 @@ class EffectSuiteTests(unittest.TestCase):
         self.assertTrue(snapshot.events[0].primary)
         self.assertEqual(snapshot.candidate_events, 2)
         self.assertEqual(renderer.ducked, "lightning")
+        self.assertEqual(snapshot.wled_skip_count, 3)
 
 
 if __name__ == "__main__":

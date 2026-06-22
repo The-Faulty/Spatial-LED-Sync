@@ -10,9 +10,10 @@ RUNTIME_PROFILES: dict[str, dict[str, object]] = {
         "analysis_width": 96,
         "analysis_height": 54,
         "target_fps": 20,
+        "motion_analysis_fps": 10,
         "wled_fps": 25,
         "frame_buffer_size": 2,
-        "max_active_waves": 18,
+        "max_active_waves": 20,
         "front_ambient_blur": 0,
     },
     "pi_5": {
@@ -21,9 +22,10 @@ RUNTIME_PROFILES: dict[str, dict[str, object]] = {
         "analysis_width": 160,
         "analysis_height": 90,
         "target_fps": 30,
+        "motion_analysis_fps": 15,
         "wled_fps": 30,
         "frame_buffer_size": 3,
-        "max_active_waves": 36,
+        "max_active_waves": 50,
     },
     "desktop_dev": {},
 }

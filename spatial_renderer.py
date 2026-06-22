@@ -64,6 +64,7 @@ class VectorizedSpatialRenderer:
         self.accepts_front_ambient_strip_sample = True
         self.waves: list[SpatialLightWave] = []
         self.previous_leds = np.zeros((topology.total, 3), dtype=np.float32)
+        self._working_leds = np.zeros((topology.total, 3), dtype=np.float32)
         self.tv_frame: np.ndarray | None = None
         self.front_ambient_color = np.zeros(3, dtype=np.float32)
         self.front_ambient_strip_colors: np.ndarray | None = None
@@ -72,8 +73,14 @@ class VectorizedSpatialRenderer:
         self._ambient_side_spill_boost = 0.0
         self._ambient_side_spill_scene_color = np.zeros(3, dtype=np.float32)
         self._spatial_mask = np.array([mode in {"spatial", "blend"} for mode in topology.sync_modes], dtype=bool)
+        self._spatial_indices = np.nonzero(self._spatial_mask)[0].astype(np.int32)
+        self._spatial_positions = topology.positions[self._spatial_indices]
         self._tv_mask = np.array([mode in {"tv_image", "blend"} for mode in topology.sync_modes], dtype=bool)
         self._blend = topology.strip_blend.reshape(-1, 1)
+        self._room_center = topology.room_center()
+        self._room_diagonal = topology.room_diagonal()
+        centered = self._spatial_positions - self._room_center.reshape(1, 3)
+        self._spatial_angles = np.arctan2(centered[:, 2], centered[:, 0]) if centered.size else np.zeros(0, dtype=np.float32)
 
     def add_events(self, events: list[LightEvent]) -> None:
         diagonal = max(0.1, self.topology.room_diagonal())
@@ -178,21 +185,24 @@ class VectorizedSpatialRenderer:
         return max(1, int(self.topology.front_ambient_indices().size))
 
     def step(self, dt: float) -> np.ndarray:
-        leds = np.zeros((self.topology.total, 3), dtype=np.float32)
+        leds = self._working_leds
+        leds.fill(0.0)
         self._render_spatial_waves(leds, dt)
         self._apply_tv_sync(leds)
         self._render_front_ambient(leds, dt)
         leds = np.clip(leds, 0.0, 1.0)
         alpha = self.config.color_smoothing
-        leds = self.previous_leds * alpha + leds * (1.0 - alpha)
-        self.previous_leds = leds
+        leds *= 1.0 - alpha
+        leds += self.previous_leds * alpha
+        self.previous_leds[...] = leds
         return self._post_process(leds)
 
     def _render_spatial_waves(self, leds: np.ndarray, dt: float) -> None:
-        if self.topology.total == 0:
+        if self.topology.total == 0 or self._spatial_indices.size == 0:
             return
         active: list[SpatialLightWave] = []
-        positions = self.topology.positions
+        positions = self._spatial_positions
+        spatial_idx = self._spatial_indices
         for wave in self.waves:
             wave.age += dt
             wave.intensity *= wave.decay_rate ** (dt * 30.0)
@@ -200,16 +210,18 @@ class VectorizedSpatialRenderer:
             if wave.intensity < self.config.wave_min_intensity or travelled > wave.radius_limit + wave.spread * 3.0:
                 continue
             active.append(wave)
-            distances = np.linalg.norm(positions - wave.origin.reshape(1, 3), axis=1)
+            offset = positions - wave.origin.reshape(1, 3)
+            distances_sq = np.einsum("ij,ij->i", offset, offset)
             if wave.kind in {"flash", "explosion"}:
                 fill_radius = max(wave.spread, travelled + wave.spread)
-                envelope = np.exp(-(distances**2) / (2.0 * fill_radius**2))
+                envelope = np.exp(-distances_sq / (2.0 * fill_radius**2))
             elif wave.kind == "impact_pulse":
-                fill_radius = max(self.topology.room_diagonal(), travelled + wave.spread)
-                local = np.exp(-(distances**2) / (2.0 * fill_radius**2))
+                fill_radius = max(self._room_diagonal, travelled + wave.spread)
+                local = np.exp(-distances_sq / (2.0 * fill_radius**2))
                 collapse = max(0.0, 1.0 - wave.age / max(0.2, wave.width))
                 envelope = np.maximum(local, 0.45 * collapse)
             elif wave.kind == "shockwave":
+                distances = np.sqrt(distances_sq)
                 ring_width = max(wave.spread * 0.45, wave.width * 0.08)
                 ring = np.exp(-((distances - travelled) ** 2) / (2.0 * ring_width**2))
                 room_flash = max(0.0, 1.0 - travelled / max(0.1, wave.radius_limit)) * 0.32
@@ -223,33 +235,36 @@ class VectorizedSpatialRenderer:
                     front = span - front
                 envelope = np.exp(-((axis - front) ** 2) / (2.0 * max(0.12, wave.width * 0.25) ** 2))
             elif wave.kind == "energy_trail":
+                distances = np.sqrt(distances_sq)
                 head = np.exp(-((distances - travelled) ** 2) / (2.0 * wave.spread**2))
                 tail = np.exp(-((distances - max(0.0, travelled - wave.spread * 3.0)) ** 2) / (2.0 * (wave.spread * 2.2) ** 2)) * 0.45
                 envelope = np.maximum(head, tail)
             elif wave.kind == "flame_shimmer":
                 noise = 0.65 + 0.35 * np.sin((positions[:, 0] * 7.0 + positions[:, 2] * 5.0 + wave.age * 18.0 + wave.phase * 6.28))
-                envelope = np.exp(-(distances**2) / (2.0 * max(wave.spread * 2.4, 0.1) ** 2)) * noise
+                envelope = np.exp(-distances_sq / (2.0 * max(wave.spread * 2.4, 0.1) ** 2)) * noise
             elif wave.kind == "underwater":
+                distances = np.sqrt(distances_sq)
                 ripple = 0.45 + 0.55 * np.sin(distances * 6.0 - wave.age * 4.0 + wave.phase * 6.28) ** 2
-                envelope = np.exp(-(distances**2) / (2.0 * max(wave.spread * 5.0, 0.1) ** 2)) * ripple
+                envelope = np.exp(-distances_sq / (2.0 * max(wave.spread * 5.0, 0.1) ** 2)) * ripple
             elif wave.kind == "portal_vortex":
-                centered = positions - self.topology.room_center().reshape(1, 3)
-                angles = np.arctan2(centered[:, 2], centered[:, 0])
+                distances = np.sqrt(distances_sq)
+                angles = self._spatial_angles
                 spiral = 0.5 + 0.5 * np.sin(angles * 3.0 * max(1, wave.direction_hint) + distances * 4.0 - wave.age * 6.0)
                 envelope = np.exp(-((distances - travelled * 0.45) ** 2) / (2.0 * (wave.spread * 2.5) ** 2)) * spiral
             elif wave.kind in {"color_bloom", "lightning", "ember_particles"}:
-                envelope = np.exp(-(distances**2) / (2.0 * max(wave.spread * (4.0 if wave.kind == "color_bloom" else 1.0), 0.1) ** 2))
+                envelope = np.exp(-distances_sq / (2.0 * max(wave.spread * (4.0 if wave.kind == "color_bloom" else 1.0), 0.1) ** 2))
                 if wave.kind == "lightning" and wave.intensity >= 0.72:
                     strobe = 1.0 if int(wave.age * 28.0 + wave.phase * 7.0) % 2 == 0 else 0.0
                     envelope = np.maximum(envelope, strobe * wave.intensity * 0.55)
             else:
+                distances = np.sqrt(distances_sq)
                 envelope = np.exp(-((distances - travelled) ** 2) / (2.0 * wave.spread**2))
             travel_fade = max(0.0, 1.0 - travelled / max(0.1, wave.radius_limit))
             contribution = (np.array(wave.color, dtype=np.float32) / 255.0) * wave.intensity * (0.2 + 0.8 * travel_fade)
             if wave.kind == "negative_wave":
-                leds[self._spatial_mask] -= envelope[self._spatial_mask].reshape(-1, 1) * wave.intensity * 0.65
+                leds[spatial_idx] -= envelope.reshape(-1, 1) * wave.intensity * 0.65
             else:
-                leds[self._spatial_mask] += envelope[self._spatial_mask].reshape(-1, 1) * contribution
+                leds[spatial_idx] += envelope.reshape(-1, 1) * contribution
         self.waves = active
 
     def _render_front_ambient(self, leds: np.ndarray, dt: float) -> None:
@@ -353,11 +368,15 @@ class VectorizedSpatialRenderer:
         return diagonal * 0.2
 
     def _post_process(self, leds: np.ndarray) -> np.ndarray:
-        hsv = cv2.cvtColor(np.clip(leds.reshape(1, -1, 3), 0, 1).astype(np.float32), cv2.COLOR_RGB2HSV)
-        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * self.config.saturation, 0, 1)
-        leds = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB).reshape(-1, 3)
+        np.clip(leds, 0, 1, out=leds)
+        leds = leds.astype(np.float32, copy=False)
+        if abs(float(self.config.saturation) - 1.0) > 0.001:
+            hsv = cv2.cvtColor(leds.reshape(1, -1, 3), cv2.COLOR_RGB2HSV)
+            hsv[:, :, 1] = np.clip(hsv[:, :, 1] * self.config.saturation, 0, 1)
+            leds = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB).reshape(-1, 3)
         wb = np.array(self.config.white_balance, dtype=np.float32)
         leds = np.clip(leds * wb * self.config.brightness, 0, 1)
         gamma = max(0.1, self.config.gamma)
-        leds = np.power(leds, 1.0 / gamma)
+        if abs(gamma - 1.0) > 0.001:
+            leds = np.power(leds, 1.0 / gamma)
         return np.clip(leds * 255.0, 0, 255).astype(np.uint8)

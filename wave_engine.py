@@ -44,6 +44,7 @@ class WaveEngine:
         self.ambient_spill_scene_color = np.zeros(3, dtype=np.float32)
         self._front_ambient_led_cache: list[int] | None = None
         self._front_ambient_led_set_cache: set[int] | None = None
+        self._front_ambient_reserved_mask_cache: np.ndarray | None = None
 
     def add_events(self, events: list[LightEvent]) -> None:
         for event in events:
@@ -267,6 +268,20 @@ class WaveEngine:
         self._front_ambient_led_cache = [front_leds[(center_idx - half + offset) % len(front_leds)] for offset in range(target_count)]
         return self._front_ambient_led_cache
 
+    def _front_ambient_reserved_mask(self) -> np.ndarray:
+        if self._front_ambient_reserved_mask_cache is not None:
+            return self._front_ambient_reserved_mask_cache
+        mask = np.zeros(self.config.total_leds, dtype=bool)
+        if self.config.lighting_mode == "front_ambient":
+            front = np.array([wall == "front" for wall in self.topology.wall_by_led], dtype=bool)
+            reserved = np.zeros(self.config.total_leds, dtype=bool)
+            led_list = self._front_ambient_leds()
+            if led_list:
+                reserved[np.array(led_list, dtype=np.int32)] = True
+            mask = front & reserved
+        self._front_ambient_reserved_mask_cache = mask
+        return mask
+
     @staticmethod
     def _wall_path(wall_leds: list[int], start_idx: int, end_idx: int, step: int) -> list[int]:
         path = [wall_leds[start_idx]]
@@ -280,45 +295,48 @@ class WaveEngine:
 
     def _render_wave(self, leds: np.ndarray, wave: LightWave, travelled: float) -> None:
         rgb = np.array(wave.color, dtype=np.float32) / 255.0
-        for led in range(self.config.total_leds):
-            if self._is_reserved_front_ambient_led(led):
-                continue
-            dist = self.topology.signed_distance(wave.position, led, wave.direction)
-            reverse_dist = self.topology.signed_distance(wave.position, led, -wave.direction)
-            bidirectional = wave.kind in {"flash", "explosion", "impact_pulse", "shockwave", "color_bloom", "underwater", "portal_vortex", "negative_wave"}
-            dist = min(dist, reverse_dist if bidirectional else dist)
-            spread_scale = 4.5 if wave.kind in {"color_bloom", "underwater"} else 2.8
-            if dist > wave.spread_rate * spread_scale and wave.kind not in {"shockwave", "impact_pulse", "lightning"}:
-                continue
-            if wave.kind == "shockwave":
-                center = travelled
-                ring_width = max(1.0, wave.spread_rate * 0.45)
-                ring = np.exp(-((dist - center) ** 2) / (2.0 * ring_width**2))
-                room_flash = max(0.0, 1.0 - travelled / max(1.0, wave.radius_limit)) * 0.32
-                envelope = max(ring, room_flash)
-            elif wave.kind == "impact_pulse":
-                room_dist = dist / max(1.0, self.config.total_leds / 2)
-                collapse = max(0.0, 1.0 - wave.age / max(0.2, wave.width))
-                envelope = max(np.exp(-(room_dist**2) / 0.9), 0.45 * collapse)
-            elif wave.kind in {"flame_shimmer", "underwater", "portal_vortex"}:
-                shimmer = 0.55 + 0.45 * np.sin(led * 0.37 + wave.age * (14.0 if wave.kind == "flame_shimmer" else 4.0) + wave.phase * 6.28) ** 2
-                envelope = np.exp(-(dist ** 2) / (2.0 * max(1.0, wave.spread_rate * spread_scale / 2.0) ** 2)) * shimmer
-            elif wave.kind == "energy_trail":
-                head = np.exp(-(dist ** 2) / (2.0 * max(1.0, wave.spread_rate) ** 2))
-                tail = np.exp(-((dist - wave.spread_rate * 3.0) ** 2) / (2.0 * max(1.0, wave.spread_rate * 2.2) ** 2)) * 0.45
-                envelope = max(head, tail)
-            elif wave.kind == "lightning" and wave.intensity >= 0.72:
-                local = np.exp(-(dist ** 2) / (2.0 * max(1.0, wave.spread_rate) ** 2))
-                strobe = 1.0 if int(wave.age * 28.0 + wave.phase * 7.0) % 2 == 0 else 0.0
-                envelope = max(local, strobe * wave.intensity * 0.55)
-            else:
-                envelope = np.exp(-(dist ** 2) / (2.0 * max(1.0, wave.spread_rate) ** 2))
-            travel_fade = max(0.0, 1.0 - travelled / max(1.0, wave.radius_limit))
-            contribution = rgb * wave.intensity * envelope * (0.25 + 0.75 * travel_fade)
-            if wave.kind == "negative_wave":
-                leds[led] -= wave.intensity * envelope * 0.65
-            else:
-                leds[led] += contribution
+        dist = self.topology.signed_distances(wave.position, wave.direction)
+        bidirectional = wave.kind in {"flash", "explosion", "impact_pulse", "shockwave", "color_bloom", "underwater", "portal_vortex", "negative_wave"}
+        if bidirectional:
+            dist = np.minimum(dist, self.topology.signed_distances(wave.position, -wave.direction))
+        spread_scale = 4.5 if wave.kind in {"color_bloom", "underwater"} else 2.8
+        active = ~self._front_ambient_reserved_mask()
+        if wave.kind not in {"shockwave", "impact_pulse", "lightning"}:
+            active &= dist <= wave.spread_rate * spread_scale
+        if not np.any(active):
+            return
+
+        if wave.kind == "shockwave":
+            ring_width = max(1.0, wave.spread_rate * 0.45)
+            ring = np.exp(-((dist - travelled) ** 2) / (2.0 * ring_width**2))
+            room_flash = max(0.0, 1.0 - travelled / max(1.0, wave.radius_limit)) * 0.32
+            envelope = np.maximum(ring, room_flash)
+        elif wave.kind == "impact_pulse":
+            room_dist = dist / max(1.0, self.config.total_leds / 2)
+            collapse = max(0.0, 1.0 - wave.age / max(0.2, wave.width))
+            envelope = np.maximum(np.exp(-(room_dist**2) / 0.9), 0.45 * collapse)
+        elif wave.kind in {"flame_shimmer", "underwater", "portal_vortex"}:
+            shimmer_speed = 14.0 if wave.kind == "flame_shimmer" else 4.0
+            shimmer = 0.55 + 0.45 * np.sin(self.topology.indices * 0.37 + wave.age * shimmer_speed + wave.phase * 6.28) ** 2
+            envelope = np.exp(-(dist**2) / (2.0 * max(1.0, wave.spread_rate * spread_scale / 2.0) ** 2)) * shimmer
+        elif wave.kind == "energy_trail":
+            head = np.exp(-(dist**2) / (2.0 * max(1.0, wave.spread_rate) ** 2))
+            tail = np.exp(-((dist - wave.spread_rate * 3.0) ** 2) / (2.0 * max(1.0, wave.spread_rate * 2.2) ** 2)) * 0.45
+            envelope = np.maximum(head, tail)
+        elif wave.kind == "lightning" and wave.intensity >= 0.72:
+            local = np.exp(-(dist**2) / (2.0 * max(1.0, wave.spread_rate) ** 2))
+            strobe = 1.0 if int(wave.age * 28.0 + wave.phase * 7.0) % 2 == 0 else 0.0
+            envelope = np.maximum(local, strobe * wave.intensity * 0.55)
+        else:
+            envelope = np.exp(-(dist**2) / (2.0 * max(1.0, wave.spread_rate) ** 2))
+
+        travel_fade = max(0.0, 1.0 - travelled / max(1.0, wave.radius_limit))
+        active_envelope = envelope[active].reshape(-1, 1)
+        if wave.kind == "negative_wave":
+            leds[active] -= active_envelope * wave.intensity * 0.65
+        else:
+            contribution = rgb.reshape(1, 3) * wave.intensity * active_envelope * (0.25 + 0.75 * travel_fade)
+            leds[active] += contribution
 
     def _is_reserved_front_ambient_led(self, led: int) -> bool:
         if self.config.lighting_mode != "front_ambient":
@@ -330,11 +348,15 @@ class WaveEngine:
         return led in self._front_ambient_led_set_cache
 
     def _post_process(self, leds: np.ndarray) -> np.ndarray:
-        hsv = cv2.cvtColor(np.clip(leds.reshape(1, -1, 3), 0, 1).astype(np.float32), cv2.COLOR_RGB2HSV)
-        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * self.config.saturation, 0, 1)
-        leds = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB).reshape(-1, 3)
+        np.clip(leds, 0, 1, out=leds)
+        leds = leds.astype(np.float32, copy=False)
+        if abs(float(self.config.saturation) - 1.0) > 0.001:
+            hsv = cv2.cvtColor(leds.reshape(1, -1, 3), cv2.COLOR_RGB2HSV)
+            hsv[:, :, 1] = np.clip(hsv[:, :, 1] * self.config.saturation, 0, 1)
+            leds = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB).reshape(-1, 3)
         wb = np.array(self.config.white_balance, dtype=np.float32)
         leds = np.clip(leds * wb * self.config.brightness, 0, 1)
         gamma = max(0.1, self.config.gamma)
-        leds = np.power(leds, 1.0 / gamma)
+        if abs(gamma - 1.0) > 0.001:
+            leds = np.power(leds, 1.0 / gamma)
         return np.clip(leds * 255.0, 0, 255).astype(np.uint8)

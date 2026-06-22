@@ -425,7 +425,7 @@ class EditorServerCase(unittest.TestCase):
         frame[:, :, 1] = 180
         manager = SpatialEditorHandler.preview_manager
         with manager.lock:
-            manager.last_snapshot = RuntimeSnapshot(frame=frame, leds=np.zeros((6, 3), dtype=np.uint8))
+            manager.last_snapshot = RuntimeSnapshot(frame=frame, leds=np.zeros((6, 3), dtype=np.uint8), wled_skip_count=4)
             manager.frame_revision = 7
             manager.led_revision = 3
         data, content_type = self.get_bytes("/api/preview/frame.jpg")
@@ -438,6 +438,7 @@ class EditorServerCase(unittest.TestCase):
         self.assertEqual(len(status["leds_flat"]), 18)
         self.assertEqual(status["lit_led_count"], 0)
         self.assertEqual(status["led_max"], 0)
+        self.assertEqual(status["wled_skip_count"], 4)
 
     def test_editor_static_refs_preview_frame_and_deselect(self) -> None:
         index, _ = self.get_bytes("/")

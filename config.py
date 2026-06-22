@@ -74,6 +74,9 @@ class EngineConfig:
     wled_timeout: float = 0.35
     wled_segment_id: int | None = None
     send_to_wled: bool = False
+    wled_protocol: str = "ddp"
+    wled_udp_port: int = 4048
+    wled_delta_threshold: int = 3
 
     total_leds: int = 240
     front_wall: WallConfig = field(default_factory=lambda: WallConfig(80, 140))
@@ -87,6 +90,7 @@ class EngineConfig:
     tv_right_boundary: int = 125
 
     target_fps: int = 30
+    motion_analysis_fps: int = 15
     wled_fps: int = 25
     frame_buffer_size: int = 4
     analysis_width: int = 192
@@ -232,8 +236,16 @@ class EngineConfig:
             errors.append("hyperhdr_instance must be zero or greater")
         if self.target_fps <= 0:
             errors.append("target_fps must be greater than 0")
+        if self.motion_analysis_fps <= 0:
+            errors.append("motion_analysis_fps must be greater than 0")
         if self.wled_fps <= 0:
             errors.append("wled_fps must be greater than 0")
+        if self.wled_protocol not in {"ddp", "json"}:
+            errors.append("wled_protocol must be ddp or json")
+        if not 1 <= self.wled_udp_port <= 65535:
+            errors.append("wled_udp_port must be between 1 and 65535")
+        if self.wled_delta_threshold < 0:
+            errors.append("wled_delta_threshold must be zero or greater")
         if self.frame_buffer_size <= 0:
             errors.append("frame_buffer_size must be greater than 0")
         if self.analysis_width <= 0 or self.analysis_height <= 0:

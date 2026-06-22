@@ -41,6 +41,7 @@ class RuntimeSnapshot:
     missed_deadlines: int = 0
     analysis_frames: int = 0
     skipped_analysis_frames: int = 0
+    wled_skip_count: int = 0
     step_ms: float = 0.0
     candidate_events: int = 0
 
@@ -93,6 +94,7 @@ class HeadlessEffectsEngine:
         self.last_step_duration = 0.0
         self.analysis_stride = 1
         self._analysis_tick = 0
+        self.last_analysis_time = 0.0
         self.frame_history: deque[np.ndarray] = deque(maxlen=12)
         self.snapshot = RuntimeSnapshot()
 
@@ -143,6 +145,7 @@ class HeadlessEffectsEngine:
         self.running = True
         now = time.monotonic()
         self.last_step = now
+        self.last_analysis_time = 0.0
         self.stat_time = now
         self.stat_frames = 0
         self.snapshot = RuntimeSnapshot(
@@ -253,6 +256,7 @@ class HeadlessEffectsEngine:
                 missed_deadlines=self.missed_deadlines,
                 analysis_frames=self.analysis_frames,
                 skipped_analysis_frames=self.skipped_analysis_frames,
+                wled_skip_count=self.wled.skip_count,
                 step_ms=self.last_step_duration * 1000.0,
                 candidate_events=candidate_events,
             )
@@ -299,6 +303,12 @@ class HeadlessEffectsEngine:
         frames = self._drain_frames(timeout)
         if not frames:
             return frames
+        if not self._analysis_due():
+            self.skipped_analysis_frames += len(frames)
+            latest = frames[-1]
+            prepared = self.processor.prepare(latest) if self.processor else latest
+            self.wave_engine.set_tv_frame(prepared)
+            return []
 
         if self.config.overload_policy == "adaptive_quality":
             if overloaded:
@@ -312,6 +322,18 @@ class HeadlessEffectsEngine:
                 prepared = self.processor.prepare(latest) if self.processor else latest
                 self.wave_engine.set_tv_frame(prepared)
                 return []
+            self.last_analysis_time = time.monotonic()
             return [frames[-1]]
 
+        self.last_analysis_time = time.monotonic()
         return frames
+
+    def _analysis_due(self) -> bool:
+        fps = min(max(1, int(self.config.motion_analysis_fps)), max(1, int(self.config.target_fps)))
+        if fps >= max(1, int(self.config.target_fps)):
+            return True
+        now = time.monotonic()
+        if self.last_analysis_time <= 0.0:
+            self.last_analysis_time = now
+            return True
+        return now - self.last_analysis_time >= 1.0 / fps

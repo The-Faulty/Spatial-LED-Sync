@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
+
 from config import EngineConfig, WallConfig
 
 
@@ -25,6 +27,11 @@ class RoomTopology:
         }
         self.clockwise_order = config.clockwise_order
         self._wall_leds = {name: self.range_inclusive(w.start, w.end) for name, w in self.walls.items()}
+        self.indices = np.arange(self.total, dtype=np.float32)
+        self.wall_by_led: list[str | None] = [None] * self.total
+        for name, leds in self._wall_leds.items():
+            for led in leds:
+                self.wall_by_led[led % self.total] = name
 
     def range_inclusive(self, start: int, end: int) -> list[int]:
         start %= self.total
@@ -46,10 +53,13 @@ class RoomTopology:
 
     def wall_for_led(self, led: int) -> str | None:
         led %= self.total
-        for name, leds in self._wall_leds.items():
-            if led in leds:
-                return name
-        return None
+        return self.wall_by_led[led]
+
+    def signed_distances(self, origin: float, direction: int) -> np.ndarray:
+        origin %= self.total
+        if direction >= 0:
+            return (self.indices - origin) % self.total
+        return (origin - self.indices) % self.total
 
     def adjacent_walls(self, wall: str) -> tuple[str, str]:
         idx = self.clockwise_order.index(wall)

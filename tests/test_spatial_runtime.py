@@ -81,6 +81,15 @@ class FakeSession:
         return None
 
 
+class FakeSocket:
+    def __init__(self) -> None:
+        self.packets: list[tuple[bytes, tuple[str, int]]] = []
+
+    def sendto(self, payload: bytes, address: tuple[str, int]) -> int:
+        self.packets.append((payload, address))
+        return len(payload)
+
+
 class SpatialRuntimeTests(unittest.TestCase):
     def test_spatial_validation_catches_device_overlap(self) -> None:
         spatial = spatial_config()
@@ -1180,15 +1189,78 @@ class SpatialRuntimeTests(unittest.TestCase):
         config = EngineConfig(total_leds=8, spatial=spatial_config(), send_to_wled=True, brightness=1.0)
         topology = SpatialRoomTopology(config)
         output = WLEDOutput(config, unittest.mock.Mock(), topology)
-        left = FakeSession()
-        right = FakeSession()
-        output.device_sessions = {"left": left, "right": right}
+        udp = FakeSocket()
+        output.udp_socket = udp  # type: ignore[assignment]
         leds = np.arange(24, dtype=np.uint8).reshape(8, 3)
         self.assertTrue(output.send(leds))
-        self.assertEqual(len(left.posts), 1)
-        self.assertEqual(len(right.posts), 1)
-        self.assertEqual(left.posts[0][1]["seg"][0]["i"][0], [0, 1, 2])
-        self.assertEqual(right.posts[0][1]["seg"][0]["i"][2], [12, 13, 14])
+        self.assertEqual(len(udp.packets), 2)
+        left_payload, left_address = udp.packets[0]
+        right_payload, right_address = udp.packets[1]
+        self.assertEqual(left_address, ("192.0.2.10", 4048))
+        self.assertEqual(right_address, ("192.0.2.11", 4048))
+        self.assertEqual(left_payload[:4], bytes([0x41, 0, 0x01, 0x01]))
+        self.assertEqual(left_payload[10:13], bytes([0, 1, 2]))
+        self.assertEqual(right_payload[16:19], bytes([12, 13, 14]))
+
+    def test_wled_output_can_use_json_fallback(self) -> None:
+        config = EngineConfig(total_leds=4, send_to_wled=True, wled_ip="192.0.2.9", brightness=1.0, wled_protocol="json")
+        output = WLEDOutput(config, unittest.mock.Mock())
+        session = FakeSession()
+        output.session = session
+        leds = np.arange(12, dtype=np.uint8).reshape(4, 3)
+        self.assertTrue(output.send(leds))
+        self.assertEqual(len(session.posts), 1)
+        self.assertEqual(session.posts[0][1]["seg"][0]["i"][0], [0, 1, 2])
+
+    def test_wled_output_skips_unchanged_single_device_frame(self) -> None:
+        config = EngineConfig(total_leds=4, send_to_wled=True, wled_ip="192.0.2.9", brightness=1.0, wled_delta_threshold=3)
+        output = WLEDOutput(config, unittest.mock.Mock())
+        udp = FakeSocket()
+        output.udp_socket = udp  # type: ignore[assignment]
+        leds = np.zeros((4, 3), dtype=np.uint8)
+        self.assertTrue(output.send(leds))
+        output.last_send = 0.0
+        self.assertFalse(output.send(leds + 2))
+        self.assertEqual(output.skip_count, 1)
+        output.last_send = 0.0
+        changed = leds.copy()
+        changed[0, 0] = 8
+        self.assertTrue(output.send(changed))
+        self.assertEqual(len(udp.packets), 2)
+
+    def test_wled_output_skips_unchanged_spatial_device_frame(self) -> None:
+        config = EngineConfig(total_leds=8, spatial=spatial_config(), send_to_wled=True, brightness=1.0, wled_delta_threshold=3)
+        topology = SpatialRoomTopology(config)
+        output = WLEDOutput(config, unittest.mock.Mock(), topology)
+        udp = FakeSocket()
+        output.udp_socket = udp  # type: ignore[assignment]
+        leds = np.arange(24, dtype=np.uint8).reshape(8, 3)
+        self.assertTrue(output.send(leds))
+        output.last_send = 0.0
+        self.assertFalse(output.send(leds + 1))
+        self.assertEqual(output.skip_count, 1)
+        output.last_send = 0.0
+        changed = leds.copy()
+        changed[0, 0] += 10
+        self.assertTrue(output.send(changed))
+        self.assertEqual(len(udp.packets), 3)
+
+    def test_wled_ddp_output_chunks_large_frames(self) -> None:
+        config = EngineConfig(total_leds=600, send_to_wled=True, wled_ip="192.0.2.9", brightness=1.0)
+        output = WLEDOutput(config, unittest.mock.Mock())
+        udp = FakeSocket()
+        output.udp_socket = udp  # type: ignore[assignment]
+        leds = np.arange(1800, dtype=np.uint8).reshape(600, 3)
+        self.assertTrue(output.send(leds))
+        self.assertEqual(len(udp.packets), 2)
+        first_payload, first_address = udp.packets[0]
+        second_payload, second_address = udp.packets[1]
+        self.assertEqual(first_address, ("192.0.2.9", 4048))
+        self.assertEqual(second_address, ("192.0.2.9", 4048))
+        self.assertEqual(int.from_bytes(first_payload[4:8], "big"), 0)
+        self.assertEqual(int.from_bytes(first_payload[8:10], "big"), 1440)
+        self.assertEqual(int.from_bytes(second_payload[4:8], "big"), 1440)
+        self.assertEqual(int.from_bytes(second_payload[8:10], "big"), 360)
 
 
 if __name__ == "__main__":
