@@ -42,6 +42,11 @@ class MotionAnalysis:
     saturation: float = 0.0
     dominant_color: tuple[int, int, int] = (0, 0, 0)
     color_velocity: float = 0.0
+    luminous_color_coverage: float = 0.0
+    luminous_color_growth: float = 0.0
+    luminous_brightness_growth: float = 0.0
+    luminous_bloom_color: tuple[int, int, int] = (0, 0, 0)
+    ambient_spill_boost_score: float = 0.0
     changed_fraction: float = 0.0
     rate_of_change: float = 0.0
     edge_activity: dict[str, EdgeMotion] = field(default_factory=dict)
@@ -66,10 +71,12 @@ class MotionDetector:
         if self.previous_gray is None:
             if gray is not None:
                 self.previous_gray = gray
+            bloom = self._luminous_bloom_metrics(frame, None) if requirements.color_stats else {}
             analysis = MotionAnalysis(
                 brightness=float(stats["brightness"]),
                 saturation=float(stats["saturation"]),
                 dominant_color=stats["color"],  # type: ignore[arg-type]
+                **bloom,
             )
             self.history.append(analysis)
             return analysis
@@ -89,6 +96,13 @@ class MotionDetector:
         analysis.dominant_color = stats["color"]  # type: ignore[assignment]
         analysis.rate_of_change = abs(analysis.brightness - prev.brightness) if prev else 0.0
         analysis.color_velocity = self._color_velocity(analysis.dominant_color, prev.dominant_color) if prev else 0.0
+        if requirements.color_stats:
+            bloom = self._luminous_bloom_metrics(frame, prev)
+            analysis.luminous_color_coverage = float(bloom["luminous_color_coverage"])
+            analysis.luminous_color_growth = float(bloom["luminous_color_growth"])
+            analysis.luminous_brightness_growth = float(bloom["luminous_brightness_growth"])
+            analysis.luminous_bloom_color = bloom["luminous_bloom_color"]  # type: ignore[assignment]
+            analysis.ambient_spill_boost_score = float(bloom["ambient_spill_boost_score"])
         if prev:
             self._apply_edge_color_velocity(analysis, prev)
         analysis.scene_change = analysis.changed_fraction > self.config.flash_changed_fraction
@@ -233,6 +247,59 @@ class MotionDetector:
                 activity.color_velocity = analysis.color_velocity
             else:
                 activity.color_velocity = self._color_velocity(activity.color, previous_activity.color)
+
+    def _luminous_bloom_metrics(self, frame: np.ndarray, previous: MotionAnalysis | None) -> dict[str, float | tuple[int, int, int]]:
+        rgb = frame[:, :, ::-1].astype(np.float32) / 255.0
+        r = rgb[:, :, 0]
+        g = rgb[:, :, 1]
+        b = rgb[:, :, 2]
+        luminance = r * 0.2126 + g * 0.7152 + b * 0.0722
+        cool_bias = ((g + b) * 0.5) - r
+        cool = (
+            (luminance >= 0.38)
+            & (b >= r * 1.04)
+            & (g >= r * 0.82)
+            & (cool_bias >= 0.035)
+            & ((b >= 0.32) | (g >= 0.34))
+        )
+        coverage = float(np.mean(cool))
+        brightness = float(np.mean(luminance))
+        prev_coverage = previous.luminous_color_coverage if previous else coverage
+        prev_brightness = previous.brightness if previous else brightness
+        coverage_growth = max(0.0, coverage - prev_coverage)
+        brightness_growth = max(0.0, brightness - prev_brightness)
+
+        if np.any(cool):
+            weights = luminance[cool].reshape(-1, 1)
+            pixels = rgb[cool]
+            color = np.average(pixels, axis=0, weights=np.maximum(weights[:, 0], 0.001))
+            bloom_color = tuple(int(value) for value in np.clip(np.rint(color * 255.0), 0, 255))
+            color_mean = color
+        else:
+            bloom_color = (0, 0, 0)
+            color_mean = np.zeros(3, dtype=np.float32)
+
+        color_level = float(np.max(color_mean))
+        if color_level > 0.001:
+            cyan_bias = ((float(color_mean[1]) + float(color_mean[2])) * 0.5 - float(color_mean[0])) / color_level
+        else:
+            cyan_bias = 0.0
+        cool_factor = float(np.clip((cyan_bias - 0.03) / 0.20, 0.0, 1.0))
+        coverage_factor = float(np.clip((coverage - 0.20) / 0.50, 0.0, 1.0))
+        brightness_factor = float(np.clip((brightness - 0.30) / 0.45, 0.0, 1.0))
+        growth_factor = float(np.clip(max(coverage_growth / 0.22, brightness_growth / 0.22), 0.0, 1.0))
+        stable_factor = 0.35 if coverage >= 0.28 and brightness >= 0.35 else 0.0
+        boost_score = coverage_factor * brightness_factor * cool_factor * max(stable_factor, growth_factor)
+        if coverage < 0.28 or brightness < 0.35:
+            boost_score *= 0.35
+
+        return {
+            "luminous_color_coverage": coverage,
+            "luminous_color_growth": coverage_growth,
+            "luminous_brightness_growth": brightness_growth,
+            "luminous_bloom_color": bloom_color,
+            "ambient_spill_boost_score": float(np.clip(boost_score, 0.0, 1.0)),
+        }
         for edge, activity in analysis.top_corner_activity.items():
             previous_activity = previous.top_corner_activity.get(edge)
             if previous_activity is None:

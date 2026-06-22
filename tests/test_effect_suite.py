@@ -5,10 +5,11 @@ import unittest.mock
 
 import numpy as np
 
-from config import DEFAULT_ENABLED_EFFECTS, EngineConfig
+from config import DEFAULT_ENABLED_EFFECTS, TRIGGER_EFFECTS, EngineConfig
 from effects_engine import HeadlessEffectsEngine
 from event_mixer import EventMixer
 from event_detector import EventDetector, LightEvent
+from hyperhdr_client import SIMULATION_EFFECT_PATTERNS, HyperHDRClient
 from motion_detector import AnalysisRequirements, EdgeMotion, MotionAnalysis, MotionDetector
 from spatial_config import default_spatial_dict
 from spatial_renderer import VectorizedSpatialRenderer
@@ -27,12 +28,39 @@ class EffectSuiteTests(unittest.TestCase):
     def event(self, kind: str, intensity: float = 0.7, edge: str = "top", **kwargs) -> LightEvent:
         return LightEvent(edge=edge, intensity=intensity, color=(255, 120, 40), kind=kind, effect_id=kind, **kwargs)
 
+    def bloom_frame(self, color_bgr: tuple[int, int, int], coverage: float, background: tuple[int, int, int] = (12, 10, 8)) -> np.ndarray:
+        frame = np.zeros((90, 160, 3), dtype=np.uint8)
+        frame[:] = background
+        width = int(frame.shape[1] * coverage)
+        if width > 0:
+            frame[:, :width] = color_bgr
+        return frame
+
     def test_old_config_gets_all_effect_toggles(self) -> None:
         config = EngineConfig.from_dict({"enabled_effects": {"spill": False}})
         self.assertEqual(set(config.enabled_effects), set(DEFAULT_ENABLED_EFFECTS))
         self.assertFalse(config.enabled_effects["spill"])
         self.assertTrue(config.enabled_effects["ambient_side_spill"])
         self.assertTrue(config.enabled_effects["shockwave"])
+        self.assertEqual(set(config.effect_sensitivity), set(TRIGGER_EFFECTS))
+        self.assertEqual(config.effect_sensitivity["shockwave"], 0.5)
+        self.assertNotIn("front_ambient", config.effect_sensitivity)
+        self.assertEqual(config.front_ambient_coverage, 1.0)
+        self.assertEqual(config.ambient_side_spill_base_intensity, 0.45)
+        self.assertEqual(config.ambient_side_spill_boost_intensity, 1.0)
+
+    def test_invalid_effect_sensitivity_fails_validation(self) -> None:
+        config = EngineConfig()
+        config.effect_sensitivity["shockwave"] = 1.2
+        self.assertTrue(any("effect_sensitivity.shockwave" in error for error in config.validate()))
+
+    def test_invalid_ambient_side_spill_settings_fail_validation(self) -> None:
+        config = EngineConfig()
+        config.ambient_side_spill_base_intensity = 1.2
+        config.ambient_side_spill_boost_intensity = 2.4
+        errors = config.validate()
+        self.assertTrue(any("ambient_side_spill_base_intensity" in error for error in errors))
+        self.assertTrue(any("ambient_side_spill_boost_intensity" in error for error in errors))
 
     def test_analysis_requirements_skip_unused_pipeline(self) -> None:
         ambient = EngineConfig(enabled_effects={key: key == "front_ambient" for key in DEFAULT_ENABLED_EFFECTS})
@@ -96,9 +124,59 @@ class EffectSuiteTests(unittest.TestCase):
             dominant_color=(220, 40, 180),
         )
         first = [event.kind for event in detector.detect(saturated)]
+        second = [event.kind for event in detector.detect(saturated)]
         later = [event.kind for event in detector.detect(saturated)]
-        self.assertIn("color_bloom", first)
+        self.assertNotIn("color_bloom", first)
+        self.assertIn("color_bloom", second)
         self.assertNotIn("color_bloom", later)
+
+    def test_shockwave_sensitivity_suppresses_borderline_scene_change(self) -> None:
+        config = EngineConfig()
+        config.effect_sensitivity["shockwave"] = 1.0
+        detector = EventDetector(config)
+        borderline = MotionAnalysis(
+            brightness=0.55,
+            saturation=0.25,
+            changed_fraction=0.42,
+            rate_of_change=0.12,
+            color_velocity=0.62,
+            dominant_color=(220, 220, 230),
+            edge_activity={"top": EdgeMotion(magnitude=0.1, confidence=0.1, toward_edge=0.1, coverage=0.08)},
+        )
+        kinds = {event.kind for event in detector.detect(borderline)}
+        self.assertNotIn("shockwave", kinds)
+
+    def test_low_sensitivity_shockwave_catches_strong_impact(self) -> None:
+        config = EngineConfig()
+        config.effect_sensitivity["shockwave"] = 0.0
+        detector = EventDetector(config)
+        impact = MotionAnalysis(
+            brightness=0.78,
+            saturation=0.62,
+            changed_fraction=0.46,
+            rate_of_change=0.24,
+            dominant_color=(255, 95, 40),
+            edge_activity={
+                "top": EdgeMotion(magnitude=0.5, confidence=0.55, toward_edge=0.5, coverage=0.35),
+                "right": EdgeMotion(magnitude=0.35, confidence=0.45, toward_edge=0.4, coverage=0.25),
+            },
+        )
+        kinds = {event.kind for event in detector.detect(impact)}
+        self.assertIn("shockwave", kinds)
+
+    def test_high_energy_effects_are_more_separated(self) -> None:
+        detector = EventDetector(EngineConfig())
+        white_flash = MotionAnalysis(
+            brightness=0.82,
+            saturation=0.18,
+            changed_fraction=0.26,
+            rate_of_change=0.12,
+            dominant_color=(235, 240, 245),
+        )
+        kinds = {event.kind for event in detector.detect(white_flash)}
+        self.assertIn("lightning", kinds)
+        self.assertNotIn("explosion", kinds)
+        self.assertNotIn("shockwave", kinds)
 
     def test_spatial_renderer_handles_new_event_kinds(self) -> None:
         config = EngineConfig(total_leds=12, spatial=spatial_config(), brightness=1.0, gamma=1.0, color_smoothing=0.0)
@@ -122,6 +200,83 @@ class EffectSuiteTests(unittest.TestCase):
             leds = renderer.step(0.2)
             self.assertEqual(leds.shape, (12, 3), kind)
             self.assertGreater(int(leds.max()), 0, kind)
+
+    def test_simulation_patterns_cover_all_effect_toggles(self) -> None:
+        pattern_names = {name for name, _label in SIMULATION_EFFECT_PATTERNS}
+        self.assertTrue(set(DEFAULT_ENABLED_EFFECTS).issubset(pattern_names))
+        self.assertIn("ambient_side_spill_boost", pattern_names)
+
+    def test_each_simulation_pattern_produces_distinct_nonblank_frame(self) -> None:
+        client = HyperHDRClient(EngineConfig(), unittest.mock.Mock())
+        idle = client._simulation_frame(160, 90, None, 0.5)
+        for effect, _label in SIMULATION_EFFECT_PATTERNS:
+            frame = client._simulation_frame(160, 90, effect, 0.45)
+            self.assertEqual(frame.shape, (90, 160, 3), effect)
+            self.assertGreater(int(frame.max()), 0, effect)
+            self.assertGreater(float(np.mean(np.abs(frame.astype(np.int16) - idle.astype(np.int16)))), 1.0, effect)
+
+    def test_simulation_patterns_are_mirrored_for_preview_orientation(self) -> None:
+        client = HyperHDRClient(EngineConfig(), unittest.mock.Mock())
+        frame = client._simulation_frame(160, 90, "ambient_side_spill", 0.5)
+        left = frame[4, 4]
+        right = frame[4, -5]
+        self.assertGreater(int(left[0]), int(right[0]))
+        self.assertGreater(int(right[2]), int(left[2]))
+
+    def test_ambient_side_spill_boost_pattern_brightens_uniform_scene(self) -> None:
+        client = HyperHDRClient(EngineConfig(), unittest.mock.Mock())
+        early = client._simulation_frame(160, 90, "ambient_side_spill_boost", 0.1)
+        late = client._simulation_frame(160, 90, "ambient_side_spill_boost", 0.8)
+        self.assertGreater(float(np.mean(late)), float(np.mean(early)) * 2.0)
+        self.assertLess(float(np.mean(np.std(late.astype(np.float32), axis=1))), 50.0)
+
+    def test_luminous_cyan_bloom_growth_boosts_ambient_spill(self) -> None:
+        detector = MotionDetector(EngineConfig())
+        req = AnalysisRequirements(color_stats=True, frame_difference=True, edge_activity=False, top_corner_activity=False, optical_flow=False, retain_flow_debug=False)
+        detector.analyze(self.bloom_frame((45, 105, 135), 0.18), req)
+        analysis = detector.analyze(self.bloom_frame((245, 245, 175), 0.72, background=(40, 70, 85)), req)
+        self.assertGreater(analysis.luminous_color_coverage, 0.55)
+        self.assertGreater(analysis.luminous_color_growth, 0.25)
+        self.assertGreater(analysis.luminous_brightness_growth, 0.10)
+        self.assertGreater(analysis.ambient_spill_boost_score, 0.35)
+        r, g, b = analysis.luminous_bloom_color
+        self.assertGreaterEqual(b, r)
+        self.assertGreaterEqual(g, r)
+
+    def test_white_flash_does_not_strongly_boost_ambient_spill(self) -> None:
+        detector = MotionDetector(EngineConfig())
+        req = AnalysisRequirements(color_stats=True, frame_difference=True, edge_activity=False, top_corner_activity=False, optical_flow=False, retain_flow_debug=False)
+        detector.analyze(self.bloom_frame((30, 30, 30), 0.2), req)
+        analysis = detector.analyze(self.bloom_frame((245, 245, 245), 0.75), req)
+        self.assertLess(analysis.luminous_color_coverage, 0.05)
+        self.assertLess(analysis.ambient_spill_boost_score, 0.08)
+
+    def test_stable_cyan_bloom_is_milder_than_growing_bloom(self) -> None:
+        config = EngineConfig()
+        req = AnalysisRequirements(color_stats=True, frame_difference=True, edge_activity=False, top_corner_activity=False, optical_flow=False, retain_flow_debug=False)
+        stable = MotionDetector(config)
+        stable_frame = self.bloom_frame((245, 245, 175), 0.72, background=(40, 70, 85))
+        first = stable.analyze(stable_frame, req)
+        second = stable.analyze(stable_frame, req)
+
+        growing = MotionDetector(config)
+        growing.analyze(self.bloom_frame((45, 105, 135), 0.18), req)
+        grown = growing.analyze(stable_frame, req)
+        self.assertLess(first.ambient_spill_boost_score, grown.ambient_spill_boost_score)
+        self.assertLess(second.ambient_spill_boost_score, grown.ambient_spill_boost_score)
+
+    def test_multicolor_bright_scene_does_not_match_luminous_bloom(self) -> None:
+        detector = MotionDetector(EngineConfig())
+        req = AnalysisRequirements(color_stats=True, frame_difference=True, edge_activity=False, top_corner_activity=False, optical_flow=False, retain_flow_debug=False)
+        start = self.bloom_frame((30, 30, 30), 0.2)
+        detector.analyze(start, req)
+        frame = np.zeros((90, 160, 3), dtype=np.uint8)
+        frame[:, :40] = (240, 240, 40)
+        frame[:, 40:80] = (40, 240, 240)
+        frame[:, 80:120] = (240, 40, 240)
+        frame[:, 120:] = (60, 180, 220)
+        analysis = detector.analyze(frame, req)
+        self.assertLess(analysis.ambient_spill_boost_score, 0.18)
 
     def test_mixer_keeps_lightning_primary_and_particles(self) -> None:
         mixer = EventMixer()
@@ -187,6 +342,15 @@ class EffectSuiteTests(unittest.TestCase):
         engine.duck_lower_priority_waves("shockwave")
         self.assertAlmostEqual(engine.waves[2].intensity, 0.175)
 
+    def test_front_ambient_coverage_controls_legacy_front_span(self) -> None:
+        config = EngineConfig(total_leds=24, brightness=1.0, gamma=1.0, color_smoothing=0.0, lighting_mode="front_ambient", front_ambient_coverage=1.0)
+        engine = WaveEngine(config, RoomTopology(config))
+        self.assertEqual(len(engine._front_ambient_leds()), len(engine.topology.range_inclusive(config.front_wall.start, config.front_wall.end)))
+
+        config = EngineConfig(total_leds=24, brightness=1.0, gamma=1.0, color_smoothing=0.0, lighting_mode="front_ambient", front_ambient_coverage=0.0)
+        engine = WaveEngine(config, RoomTopology(config))
+        self.assertEqual(engine._front_ambient_leds(), [])
+
     def test_spatial_renderer_ducks_lower_priority_waves(self) -> None:
         config = EngineConfig(total_leds=12, spatial=spatial_config())
         topology = SpatialRoomTopology(config)
@@ -197,6 +361,35 @@ class EffectSuiteTests(unittest.TestCase):
         after_by_kind = {wave.kind: wave.intensity for wave in renderer.waves}
         self.assertLess(after_by_kind["spill"], before[0])
         self.assertGreaterEqual(after_by_kind["shockwave"], 0.89)
+
+    def test_high_energy_spatial_effects_fill_room(self) -> None:
+        config = EngineConfig(total_leds=12, spatial=spatial_config(), brightness=1.0, gamma=1.0, color_smoothing=0.0)
+        topology = SpatialRoomTopology(config)
+        for kind in ("shockwave", "impact_pulse"):
+            renderer = VectorizedSpatialRenderer(config, topology)
+            renderer.add_events([self.event(kind, 0.95, width=1.0)])
+            leds = renderer.step(0.05)
+            self.assertGreater(int(np.min(np.max(leds, axis=1))), 5, kind)
+
+    def test_lightning_room_fill_depends_on_intensity(self) -> None:
+        config = EngineConfig(total_leds=12, spatial=spatial_config(), brightness=1.0, gamma=1.0, color_smoothing=0.0)
+        topology = SpatialRoomTopology(config)
+        high = VectorizedSpatialRenderer(config, topology)
+        high.add_events([self.event("lightning", 0.9, pulse_count=1)])
+        high_leds = high.step(0.01)
+        low = VectorizedSpatialRenderer(config, topology)
+        low.add_events([self.event("lightning", 0.55, pulse_count=1)])
+        low_leds = low.step(0.01)
+        self.assertGreater(int(np.min(np.max(high_leds, axis=1))), 20)
+        self.assertLess(int(np.min(np.max(low_leds, axis=1))), 20)
+
+    def test_high_energy_legacy_effects_fill_room(self) -> None:
+        config = EngineConfig(total_leds=24, brightness=1.0, gamma=1.0, color_smoothing=0.0)
+        for kind in ("shockwave", "impact_pulse"):
+            engine = WaveEngine(config, RoomTopology(config))
+            engine.add_events([self.event(kind, 0.95, width=1.0)])
+            leds = engine.step(0.05)
+            self.assertGreater(int(np.min(np.max(leds, axis=1))), 5, kind)
 
     def test_headless_engine_snapshot_reports_mixed_events(self) -> None:
         class Queue:

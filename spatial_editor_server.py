@@ -15,8 +15,9 @@ from urllib.parse import urlparse
 import cv2
 import numpy as np
 
-from config import DEFAULT_ENABLED_EFFECTS, EngineConfig
+from config import DEFAULT_EFFECT_SENSITIVITY, DEFAULT_ENABLED_EFFECTS, TRIGGER_EFFECTS, EngineConfig
 from effects_engine import HeadlessEffectsEngine, RuntimeSnapshot
+from hyperhdr_client import SIMULATION_EFFECT_PATTERNS
 from spatial_config import pack_spatial_device_ranges, parse_spatial_config, spatial_config_to_dict, validate_spatial_config
 from spatial_topology import SpatialRoomTopology
 
@@ -35,14 +36,19 @@ class PreviewRuntimeManager:
         self.last_error = ""
         self.led_revision = 0
         self.frame_revision = 0
+        self.preview_mode = "stopped"
+        self.looping_effect = ""
 
-    def start(self, config_path: Path) -> dict[str, object]:
+    def start(self, config_path: Path, simulate_input: bool | None = None) -> dict[str, object]:
         with self.lock:
             self.stop_locked()
             self.last_snapshot = RuntimeSnapshot()
             self.led_revision = 0
             self.frame_revision = 0
+            self.looping_effect = ""
             config = EngineConfig.load(config_path)
+            if simulate_input is not None:
+                config.simulate_input = simulate_input
             config.send_to_wled = False
             config.debug = False
             logger = logging.getLogger("spatial_editor.preview")
@@ -52,18 +58,40 @@ class PreviewRuntimeManager:
                 self.runtime.start()
             except Exception as exc:
                 self.runtime = None
+                self.preview_mode = "stopped"
                 self.last_error = str(exc)
                 return {"running": False, "error": self.last_error}
             self.stop_event.clear()
             self.thread = threading.Thread(target=self._loop, daemon=True)
             self.thread.start()
+            self.preview_mode = "simulation" if config.simulate_input else "live"
             self.last_error = ""
-            return {"running": True, "error": ""}
+            return {"running": True, "error": "", "mode": self.preview_mode}
 
     def stop(self) -> dict[str, object]:
         with self.lock:
             self.stop_locked()
             return {"running": False, "error": self.last_error}
+
+    def trigger(self, effect: str) -> dict[str, object]:
+        with self.lock:
+            runtime = self.runtime
+            if runtime is None or not runtime.running:
+                return {"ok": False, "error": "preview is not running"}
+            if not runtime.config.simulate_input:
+                return {"ok": False, "error": "simulation input is disabled"}
+            ok = runtime.trigger_simulation_effect(effect)
+            if ok:
+                if effect.startswith("loop:"):
+                    self.looping_effect = effect.split(":", 1)[1]
+                elif effect == "idle":
+                    self.looping_effect = ""
+            return {
+                "ok": ok,
+                "effect": effect,
+                "looping_effect": self.looping_effect,
+                "error": "" if ok else "unable to trigger simulation effect",
+            }
 
     def stop_locked(self) -> None:
         self.stop_event.set()
@@ -76,8 +104,10 @@ class PreviewRuntimeManager:
         if runtime:
             runtime.stop()
         self.last_snapshot.running = False
+        self.preview_mode = "stopped"
+        self.looping_effect = ""
 
-    def status(self) -> dict[str, object]:
+    def status(self, config_path: Path | None = None) -> dict[str, object]:
         with self.lock:
             snapshot = self.last_snapshot
             if snapshot.leds is not None:
@@ -92,16 +122,31 @@ class PreviewRuntimeManager:
                 led_max = 0
                 lit_led_count = 0
             enabled_effects = dict(DEFAULT_ENABLED_EFFECTS)
+            effect_sensitivity = dict(DEFAULT_EFFECT_SENSITIVITY)
+            front_ambient_coverage = 1.0
+            ambient_side_spill_base_intensity = 0.45
+            ambient_side_spill_boost_intensity = 1.0
             active_effect_counts: dict[str, int] = {}
             runtime = self.runtime
             if runtime is not None:
                 enabled_effects.update(runtime.config.enabled_effects)
+                effect_sensitivity.update(runtime.config.effect_sensitivity)
+                front_ambient_coverage = runtime.config.front_ambient_coverage
+                ambient_side_spill_base_intensity = runtime.config.ambient_side_spill_base_intensity
+                ambient_side_spill_boost_intensity = runtime.config.ambient_side_spill_boost_intensity
                 renderer = runtime.wave_engine
                 waves = getattr(renderer, "waves", []) if renderer is not None else []
                 for wave in waves:
                     kind = getattr(wave, "kind", "")
                     if kind:
                         active_effect_counts[kind] = active_effect_counts.get(kind, 0) + 1
+            elif config_path is not None:
+                config = EngineConfig.load(config_path)
+                enabled_effects.update(config.enabled_effects)
+                effect_sensitivity.update(config.effect_sensitivity)
+                front_ambient_coverage = config.front_ambient_coverage
+                ambient_side_spill_base_intensity = config.ambient_side_spill_base_intensity
+                ambient_side_spill_boost_intensity = config.ambient_side_spill_boost_intensity
             triggered = [
                 {
                     "kind": event.kind,
@@ -112,15 +157,22 @@ class PreviewRuntimeManager:
                     "primary": event.primary,
                 }
                 for event in snapshot.events
+                if event.kind not in {"front_ambient", "ambient_side_spill"}
             ]
             return {
                 "running": bool(self.runtime and self.runtime.running),
+                "preview_mode": self.preview_mode,
+                "looping_effect": self.looping_effect,
                 "fps": snapshot.fps,
                 "active_waves": snapshot.active_waves,
                 "active_effect_counts": active_effect_counts,
                 "triggered_effects": triggered,
                 "candidate_events": snapshot.candidate_events,
                 "enabled_effects": enabled_effects,
+                "effect_sensitivity": effect_sensitivity,
+                "front_ambient_coverage": front_ambient_coverage,
+                "ambient_side_spill_base_intensity": ambient_side_spill_base_intensity,
+                "ambient_side_spill_boost_intensity": ambient_side_spill_boost_intensity,
                 "buffered_frames": snapshot.buffered_frames,
                 "hyperhdr_connected": snapshot.hyperhdr_connected,
                 "wled_enabled": False,
@@ -181,7 +233,7 @@ class SpatialEditorHandler(BaseHTTPRequestHandler):
             self._send_preview_colors()
             return
         if path == "/api/preview/status":
-            self._send_json(self.preview_manager.status(), compact=True)
+            self._send_json(self.preview_manager.status(self.config_path), compact=True)
             return
         if path == "/api/preview/frame.jpg":
             self._send_preview_frame()
@@ -193,8 +245,17 @@ class SpatialEditorHandler(BaseHTTPRequestHandler):
         if path == "/api/preview/start":
             self._send_json(self.preview_manager.start(self.config_path))
             return
+        if path == "/api/preview/start-simulation":
+            self._send_json(self.preview_manager.start(self.config_path, simulate_input=True))
+            return
+        if path == "/api/preview/stop-simulation":
+            self._send_json(self.preview_manager.stop())
+            return
         if path == "/api/preview/stop":
             self._send_json(self.preview_manager.stop())
+            return
+        if path == "/api/preview/trigger":
+            self._trigger_preview_effect()
             return
         if path == "/api/effects":
             self._update_effects()
@@ -215,11 +276,27 @@ class SpatialEditorHandler(BaseHTTPRequestHandler):
             config.enabled_effects.update(
                 {key: bool(value) for key, value in payload["enabled_effects"].items() if key in DEFAULT_ENABLED_EFFECTS}
             )
+        if isinstance(payload.get("effect_sensitivity"), dict):
+            try:
+                config.effect_sensitivity.update(
+                    {key: float(value) for key, value in payload["effect_sensitivity"].items() if key in TRIGGER_EFFECTS}
+                )
+            except (TypeError, ValueError):
+                self._send_json({"ok": False, "errors": ["effect_sensitivity values must be numbers"]}, status=400)
+                return
+        for field in ("ambient_side_spill_base_intensity", "ambient_side_spill_boost_intensity"):
+            if field in payload:
+                try:
+                    setattr(config, field, float(payload[field]))
+                except (TypeError, ValueError):
+                    self._send_json({"ok": False, "errors": [f"{field} must be a number"]}, status=400)
+                    return
         errors = config.validate()
         if errors:
             self._send_json({"ok": False, "errors": errors}, status=400)
             return
         config.save(self.config_path)
+        self._apply_effect_settings_to_preview(config)
         self._send_json({"ok": True, "config": config.to_dict()})
 
     def log_message(self, format: str, *args: object) -> None:
@@ -229,7 +306,27 @@ class SpatialEditorHandler(BaseHTTPRequestHandler):
         config = EngineConfig.load(self.config_path)
         spatial = parse_spatial_config(config.spatial, config.total_leds)
         config.spatial = spatial_config_to_dict(spatial)
-        self._send_json({"config": config.to_dict(), "spatial": config.spatial})
+        patterns = [{"effect": effect, "label": label} for effect, label in SIMULATION_EFFECT_PATTERNS]
+        self._send_json({"config": config.to_dict(), "spatial": config.spatial, "simulation_patterns": patterns})
+
+    def _trigger_preview_effect(self) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+        except json.JSONDecodeError:
+            self._send_json({"ok": False, "error": "invalid JSON"}, status=400)
+            return
+        effect = str(payload.get("effect", "")).strip()
+        valid = {name for name, _label in SIMULATION_EFFECT_PATTERNS}
+        legacy = {"left_exit", "right_exit", "top_spill", "top_color_exit_left", "top_color_exit_right", "pan_left", "pan_right"}
+        requested = effect
+        if effect.startswith("loop:"):
+            requested = effect.split(":", 1)[1]
+        if requested != "idle" and requested not in valid and requested not in legacy:
+            self._send_json({"ok": False, "error": f"unknown simulation effect: {effect}"}, status=400)
+            return
+        result = self.preview_manager.trigger(effect)
+        self._send_json(result, status=200 if result.get("ok") else 400)
 
     def _update_effects(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))
@@ -244,18 +341,79 @@ class SpatialEditorHandler(BaseHTTPRequestHandler):
             return
         config = EngineConfig.load(self.config_path)
         config.enabled_effects.update({key: bool(value) for key, value in requested.items() if key in DEFAULT_ENABLED_EFFECTS})
+        if isinstance(payload.get("effect_sensitivity"), dict):
+            try:
+                config.effect_sensitivity.update(
+                    {key: float(value) for key, value in payload["effect_sensitivity"].items() if key in TRIGGER_EFFECTS}
+                )
+            except (TypeError, ValueError):
+                self._send_json({"ok": False, "errors": ["effect_sensitivity values must be numbers"]}, status=400)
+                return
+        if "front_ambient_coverage" in payload:
+            try:
+                config.front_ambient_coverage = float(payload["front_ambient_coverage"])
+            except (TypeError, ValueError):
+                self._send_json({"ok": False, "errors": ["front_ambient_coverage must be a number"]}, status=400)
+                return
+        for field in ("ambient_side_spill_base_intensity", "ambient_side_spill_boost_intensity"):
+            if field in payload:
+                try:
+                    setattr(config, field, float(payload[field]))
+                except (TypeError, ValueError):
+                    self._send_json({"ok": False, "errors": [f"{field} must be a number"]}, status=400)
+                    return
         errors = config.validate()
         if errors:
             self._send_json({"ok": False, "errors": errors}, status=400)
             return
         config.save(self.config_path)
+        self._apply_effect_settings_to_preview(config)
+        self._send_json(
+            {
+                "ok": True,
+                "enabled_effects": config.enabled_effects,
+                "effect_sensitivity": config.effect_sensitivity,
+                "front_ambient_coverage": config.front_ambient_coverage,
+                "ambient_side_spill_base_intensity": config.ambient_side_spill_base_intensity,
+                "ambient_side_spill_boost_intensity": config.ambient_side_spill_boost_intensity,
+            }
+        )
+
+    def _apply_effect_settings_to_preview(self, config: EngineConfig) -> None:
         with self.preview_manager.lock:
             runtime = self.preview_manager.runtime
-            if runtime is not None:
-                runtime.config.enabled_effects.update(config.enabled_effects)
-                if runtime.event_detector is not None:
-                    runtime.event_detector.config.enabled_effects.update(config.enabled_effects)
-        self._send_json({"ok": True, "enabled_effects": config.enabled_effects})
+            if runtime is None:
+                return
+            runtime.config.enabled_effects.update(config.enabled_effects)
+            runtime.config.effect_sensitivity.update(config.effect_sensitivity)
+            runtime.config.front_ambient_coverage = config.front_ambient_coverage
+            runtime.config.ambient_side_spill_base_intensity = config.ambient_side_spill_base_intensity
+            runtime.config.ambient_side_spill_boost_intensity = config.ambient_side_spill_boost_intensity
+            if runtime.event_detector is not None:
+                runtime.event_detector.config.enabled_effects.update(config.enabled_effects)
+                runtime.event_detector.config.effect_sensitivity.update(config.effect_sensitivity)
+                runtime.event_detector.config.front_ambient_coverage = config.front_ambient_coverage
+                runtime.event_detector.config.ambient_side_spill_base_intensity = config.ambient_side_spill_base_intensity
+                runtime.event_detector.config.ambient_side_spill_boost_intensity = config.ambient_side_spill_boost_intensity
+            renderer = runtime.wave_engine
+            if renderer is None:
+                return
+            waves = getattr(renderer, "waves", None)
+            if isinstance(waves, list):
+                renderer.waves = [
+                    wave
+                    for wave in waves
+                    if config.enabled_effects.get(getattr(wave, "kind", ""), True)
+                ]
+            if not config.enabled_effects.get("front_ambient", True):
+                if hasattr(renderer, "front_ambient_intensity"):
+                    renderer.front_ambient_intensity = 0.0
+                if hasattr(renderer, "front_ambient_strip_colors"):
+                    renderer.front_ambient_strip_colors = None
+            if hasattr(renderer, "_front_ambient_led_cache"):
+                renderer._front_ambient_led_cache = None
+            if hasattr(renderer, "_front_ambient_led_set_cache"):
+                renderer._front_ambient_led_set_cache = None
 
     def _send_preview_colors(self) -> None:
         config = EngineConfig.load(self.config_path)

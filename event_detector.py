@@ -31,6 +31,7 @@ class EventDetector:
         self.previous_brightness = 0.0
         self.frame_index = 0
         self.last_emit_frame: dict[str, int] = {}
+        self.persistence_counts: dict[str, int] = {}
 
     def detect(self, analysis: MotionAnalysis) -> list[LightEvent]:
         self.frame_index += 1
@@ -44,12 +45,12 @@ class EventDetector:
             for edge, activity in analysis.edge_activity.items():
                 if edge == "bottom" and not self.config.bottom_edge_enabled:
                     continue
-                if activity.toward_edge <= 0.12 and activity.coverage <= 0.08:
+                if activity.toward_edge <= self._threshold("spill", 0.12) and activity.coverage <= self._threshold("spill", 0.08):
                     continue
                 intensity = self._score(analysis, edge)
                 if self.config.lighting_mode == "front_ambient" and edge in {"left", "right", "bottom"} and intensity < self.config.side_major_threshold:
                     continue
-                if intensity >= self.config.level1_threshold:
+                if intensity >= self._threshold("spill", self.config.level1_threshold):
                     events.append(LightEvent(edge, intensity, activity.color, "spill", color_velocity=activity.color_velocity, effect_id="spill"))
 
         if self._effect_enabled("top_color_exit"):
@@ -62,7 +63,8 @@ class EventDetector:
             intensity = min(1.0, analysis.changed_fraction + analysis.brightness)
             events.append(LightEvent("top", intensity, analysis.dominant_color, "flash", color_velocity=analysis.color_velocity, effect_id="flash", width=1.6, duration=0.65))
 
-        if self._effect_enabled("shockwave") and self._is_shockwave(analysis):
+        if self._effect_enabled("shockwave") and self._can_emit("shockwave", self._cooldown("shockwave", 10)) and self._is_shockwave(analysis):
+            self._mark_emitted("shockwave")
             events.append(LightEvent("top", min(1.0, analysis.changed_fraction * 1.4), analysis.dominant_color, "shockwave", color_velocity=analysis.color_velocity, effect_id="shockwave", width=0.22, duration=1.4))
 
         if self._effect_enabled("explosion") and self._is_explosion(analysis):
@@ -81,17 +83,17 @@ class EventDetector:
         if self._effect_enabled("negative_wave") and self._is_negative_wave(analysis):
             events.append(LightEvent("top", min(1.0, self.previous_brightness - analysis.brightness), (0, 0, 0), "negative_wave", effect_id="negative_wave", width=1.5, duration=0.9))
 
-        if self._effect_enabled("color_bloom") and self._can_emit("color_bloom", 50) and self._is_color_bloom(analysis):
+        if self._effect_enabled("color_bloom") and self._can_emit("color_bloom", 50) and self._persistent_match("color_bloom", self._is_color_bloom(analysis)):
             self._mark_emitted("color_bloom")
             events.append(LightEvent("top", min(0.65, analysis.saturation * analysis.brightness), analysis.dominant_color, "color_bloom", effect_id="color_bloom", width=2.0, duration=2.5))
 
-        if self._effect_enabled("flame_shimmer") and self._can_emit("flame_shimmer", 18) and self._is_flame_shimmer(analysis):
+        if self._effect_enabled("flame_shimmer") and self._can_emit("flame_shimmer", 18) and self._persistent_match("flame_shimmer", self._is_flame_shimmer(analysis)):
             self._mark_emitted("flame_shimmer")
             events.append(LightEvent("top", min(1.0, analysis.saturation * 0.6 + analysis.rate_of_change * 2.0), analysis.dominant_color, "flame_shimmer", effect_id="flame_shimmer", pulse_count=4, duration=0.8))
             if self._effect_enabled("ember_particles"):
                 events.append(LightEvent("top", 0.45, analysis.dominant_color, "ember_particles", effect_id="ember_particles", pulse_count=7, secondary=True))
 
-        if self._effect_enabled("underwater") and self._can_emit("underwater", 55) and self._is_underwater(analysis):
+        if self._effect_enabled("underwater") and self._can_emit("underwater", 55) and self._persistent_match("underwater", self._is_underwater(analysis)):
             self._mark_emitted("underwater")
             events.append(LightEvent("top", min(0.55, analysis.brightness + analysis.saturation * 0.35), analysis.dominant_color, "underwater", effect_id="underwater", width=1.2, duration=2.0, phase=analysis.color_velocity))
 
@@ -118,6 +120,33 @@ class EventDetector:
 
     def _effect_enabled(self, kind: str) -> bool:
         return self.config.enabled_effects.get(kind, True)
+
+    def _sensitivity(self, kind: str) -> float:
+        return max(0.0, min(1.0, float(self.config.effect_sensitivity.get(kind, 0.5))))
+
+    def _threshold(self, kind: str, base: float) -> float:
+        return max(0.0, min(1.0, base * (0.65 + self._sensitivity(kind) * 0.70)))
+
+    def _upper_threshold(self, kind: str, base: float) -> float:
+        return max(0.0, min(1.0, base * (1.20 - self._sensitivity(kind) * 0.40)))
+
+    def _cooldown(self, kind: str, base: int) -> int:
+        return max(1, int(round(base * (0.70 + self._sensitivity(kind) * 0.90))))
+
+    def _persistence_required(self, kind: str) -> int:
+        sensitivity = self._sensitivity(kind)
+        if sensitivity <= 0.2:
+            return 1
+        if sensitivity >= 0.8:
+            return 3
+        return 2
+
+    def _persistent_match(self, kind: str, matched: bool) -> bool:
+        if not matched:
+            self.persistence_counts[kind] = 0
+            return False
+        self.persistence_counts[kind] = self.persistence_counts.get(kind, 0) + 1
+        return self.persistence_counts[kind] >= self._persistence_required(kind)
 
     def _can_emit(self, kind: str, cooldown_frames: int) -> bool:
         return self.frame_index - self.last_emit_frame.get(kind, -cooldown_frames) >= cooldown_frames
@@ -152,13 +181,13 @@ class EventDetector:
         events: list[LightEvent] = []
         for edge, activity in analysis.top_corner_activity.items():
             color_exit_velocity = max(activity.color_velocity, activity.color_motion_velocity)
-            if color_exit_velocity < self.config.top_color_exit_velocity_threshold:
+            if color_exit_velocity < self._threshold("top_color_exit", self.config.top_color_exit_velocity_threshold):
                 continue
-            if activity.magnitude < self.config.top_color_exit_motion_threshold:
+            if activity.magnitude < self._threshold("top_color_exit", self.config.top_color_exit_motion_threshold):
                 continue
-            if activity.coverage < self.config.top_color_exit_coverage_threshold:
+            if activity.coverage < self._threshold("top_color_exit", self.config.top_color_exit_coverage_threshold):
                 continue
-            if activity.toward_edge < 0.22:
+            if activity.toward_edge < self._threshold("top_color_exit", 0.22):
                 continue
 
             intensity = (
@@ -190,69 +219,106 @@ class EventDetector:
     def _energy_trail_events(self, analysis: MotionAnalysis) -> list[LightEvent]:
         events: list[LightEvent] = []
         for edge, activity in analysis.edge_activity.items():
-            if activity.coverage < 0.05 or activity.magnitude < 0.18:
+            if activity.coverage < self._threshold("energy_trail", 0.06) or activity.magnitude < self._threshold("energy_trail", 0.20):
                 continue
-            if activity.toward_edge < 0.18 and activity.color_motion_velocity < 0.25:
+            if activity.toward_edge < self._threshold("energy_trail", 0.22) and activity.color_motion_velocity < self._threshold("energy_trail", 0.30):
                 continue
-            if max(activity.color_velocity, activity.color_motion_velocity, analysis.color_velocity) < 0.12:
+            if max(activity.color_velocity, activity.color_motion_velocity, analysis.color_velocity) < self._threshold("energy_trail", 0.14):
+                continue
+            if analysis.saturation < self._threshold("energy_trail", 0.25) and max(activity.color_velocity, activity.color_motion_velocity) < self._threshold("energy_trail", 0.34):
                 continue
             intensity = min(1.0, activity.magnitude * 0.45 + activity.coverage * 0.25 + activity.toward_edge * 0.25 + activity.color_motion_velocity * 0.35)
-            if intensity >= self.config.level1_threshold:
+            if intensity >= self._threshold("energy_trail", self.config.level1_threshold):
                 events.append(LightEvent(edge, intensity, activity.color, "energy_trail", color_velocity=activity.color_motion_velocity, effect_id="energy_trail", width=0.6, duration=1.3))
         return events
 
     def _is_flash(self, analysis: MotionAnalysis) -> bool:
-        return analysis.changed_fraction >= self.config.flash_changed_fraction and analysis.brightness > 0.35
+        return analysis.changed_fraction >= self._threshold("flash", self.config.flash_changed_fraction) and analysis.brightness > self._threshold("flash", 0.35)
 
     def _is_shockwave(self, analysis: MotionAnalysis) -> bool:
-        return analysis.changed_fraction >= self.config.flash_changed_fraction * 0.75 and analysis.rate_of_change > 0.08
+        broad_activity = self._broad_edge_activity(analysis)
+        impact_like = analysis.rate_of_change >= self._threshold("shockwave", 0.12) and (
+            broad_activity >= self._threshold("shockwave", 0.20)
+            or analysis.brightness >= self._threshold("shockwave", 0.58)
+            or analysis.saturation >= self._threshold("shockwave", 0.50)
+        )
+        ordinary_cut = analysis.color_velocity >= self._upper_threshold("shockwave", 0.52) and analysis.rate_of_change < self._threshold("shockwave", 0.18)
+        return (
+            analysis.changed_fraction >= self._threshold("shockwave", self.config.flash_changed_fraction * 0.82)
+            and impact_like
+            and not ordinary_cut
+        )
 
     def _is_explosion(self, analysis: MotionAnalysis) -> bool:
         brightness_spike = analysis.brightness - self.previous_brightness
+        r, g, b = analysis.dominant_color
+        warm = r >= g >= b * 0.55 or (r > 150 and g > 60 and b < 130)
         return (
-            brightness_spike >= self.config.explosion_brightness_spike
-            and analysis.saturation > 0.35
-            and analysis.changed_fraction > 0.22
+            brightness_spike >= self._threshold("explosion", self.config.explosion_brightness_spike)
+            and analysis.saturation > self._threshold("explosion", 0.38)
+            and analysis.changed_fraction > self._threshold("explosion", 0.26)
+            and warm
         )
 
     def _is_lightning(self, analysis: MotionAnalysis) -> bool:
-        return analysis.brightness > 0.68 and analysis.changed_fraction > 0.18 and analysis.saturation < 0.45
+        return (
+            analysis.brightness > self._threshold("lightning", 0.72)
+            and analysis.changed_fraction > self._threshold("lightning", 0.22)
+            and analysis.saturation < self._upper_threshold("lightning", 0.42)
+            and analysis.rate_of_change > self._threshold("lightning", 0.08)
+        )
 
     def _is_impact_pulse(self, analysis: MotionAnalysis) -> bool:
-        return analysis.rate_of_change > 0.10 and analysis.changed_fraction > 0.12
+        return (
+            analysis.rate_of_change > self._threshold("impact_pulse", 0.13)
+            and self._threshold("impact_pulse", 0.12) < analysis.changed_fraction < self._upper_threshold("impact_pulse", 0.46)
+            and analysis.brightness > self._threshold("impact_pulse", 0.20)
+        )
 
     def _is_negative_wave(self, analysis: MotionAnalysis) -> bool:
-        return (self.previous_brightness - analysis.brightness) > 0.16 and analysis.changed_fraction > 0.18
+        return (self.previous_brightness - analysis.brightness) > self._threshold("negative_wave", 0.16) and analysis.changed_fraction > self._threshold("negative_wave", 0.18)
 
     def _is_color_bloom(self, analysis: MotionAnalysis) -> bool:
-        return analysis.saturation > 0.68 and analysis.brightness > 0.24 and 0.01 <= analysis.changed_fraction < 0.28
+        return analysis.saturation > self._threshold("color_bloom", 0.68) and analysis.brightness > self._threshold("color_bloom", 0.24) and 0.01 <= analysis.changed_fraction < self._upper_threshold("color_bloom", 0.28)
 
     def _is_flame_shimmer(self, analysis: MotionAnalysis) -> bool:
         r, g, b = analysis.dominant_color
         warm = r > 140 and g > 45 and b < 110 and r >= g
-        return warm and analysis.saturation > 0.42 and (analysis.rate_of_change > 0.025 or analysis.flow_confidence > 0.05)
+        return warm and analysis.saturation > self._threshold("flame_shimmer", 0.42) and (analysis.rate_of_change > self._threshold("flame_shimmer", 0.025) or analysis.flow_confidence > self._threshold("flame_shimmer", 0.05))
 
     def _is_underwater(self, analysis: MotionAnalysis) -> bool:
         r, g, b = analysis.dominant_color
         cool = b > r * 1.25 and (g > r * 0.9 or b > 120)
-        return cool and analysis.brightness > 0.12 and analysis.flow_confidence < 0.35 and 0.005 <= analysis.changed_fraction < 0.22
+        return cool and analysis.brightness > self._threshold("underwater", 0.12) and analysis.flow_confidence < self._upper_threshold("underwater", 0.35) and 0.005 <= analysis.changed_fraction < self._upper_threshold("underwater", 0.22)
 
     def _is_portal_vortex(self, analysis: MotionAnalysis) -> bool:
         dx, dy = analysis.dominant_flow
-        return analysis.flow_confidence > 0.34 and abs(dx) > 0.6 and abs(dy) > 0.25 and analysis.saturation > 0.35
+        rotational_hint = min(abs(dx), abs(dy)) / max(abs(dx), abs(dy), 0.001)
+        center_activity = analysis.changed_fraction * 0.45 + analysis.flow_confidence * 0.55
+        return (
+            analysis.flow_confidence > self._threshold("portal_vortex", 0.38)
+            and abs(dx) > self._threshold("portal_vortex", 0.65)
+            and abs(dy) > self._threshold("portal_vortex", 0.28)
+            and rotational_hint > self._threshold("portal_vortex", 0.24)
+            and center_activity > self._threshold("portal_vortex", 0.38)
+            and analysis.saturation > self._threshold("portal_vortex", 0.35)
+        )
 
     def _directional_sweep(self, analysis: MotionAnalysis) -> tuple[int, float] | None:
         dx, dy = analysis.dominant_flow
         dominant = dx if abs(dx) >= abs(dy) else dy
-        if abs(dominant) < 0.75 or analysis.flow_confidence < 0.30:
+        edge_agreement = self._directional_edge_agreement(analysis, 1 if dominant > 0 else -1)
+        if abs(dominant) < self._threshold("directional_sweep", 0.75) or analysis.flow_confidence < self._threshold("directional_sweep", 0.30) or edge_agreement < self._threshold("directional_sweep", 0.18):
             return None
         return (1 if dominant > 0 else -1, min(1.0, analysis.flow_confidence * 0.8 + abs(dominant) / 8.0))
 
     def _scene_wipe(self, analysis: MotionAnalysis) -> tuple[int, float] | None:
         dx, dy = analysis.dominant_flow
-        if analysis.changed_fraction < 0.32 or analysis.color_velocity < 0.18:
+        if analysis.changed_fraction < self._threshold("scene_wipe", 0.34) or analysis.color_velocity < self._threshold("scene_wipe", 0.20):
             return None
         dominant = dx if abs(dx) >= abs(dy) else dy
+        if abs(dominant) < self._threshold("scene_wipe", 0.35) or analysis.flow_confidence < self._threshold("scene_wipe", 0.18):
+            return None
         direction = 1 if dominant >= 0 else -1
         return (direction, min(1.0, analysis.changed_fraction * 0.65 + analysis.color_velocity * 0.55))
 
@@ -260,9 +326,24 @@ class EventDetector:
         dx, dy = analysis.dominant_flow
         horizontal = abs(dx)
         vertical = abs(dy)
-        if horizontal <= vertical * 1.7:
+        if horizontal <= vertical * (1.9 + self._sensitivity("camera_pan") * 0.35):
             return None
         confidence = min(1.0, analysis.flow_confidence + horizontal / 6.0)
-        if confidence < self.config.camera_pan_confidence:
+        if confidence < self._threshold("camera_pan", self.config.camera_pan_confidence):
             return None
         return (1 if dx > 0 else -1, confidence * 0.65)
+
+    def _broad_edge_activity(self, analysis: MotionAnalysis) -> float:
+        if not analysis.edge_activity:
+            return 0.0
+        values = [activity.coverage * 0.55 + activity.confidence * 0.30 + activity.toward_edge * 0.15 for activity in analysis.edge_activity.values()]
+        return max(values) if values else 0.0
+
+    def _directional_edge_agreement(self, analysis: MotionAnalysis, direction: int) -> float:
+        if not analysis.edge_activity:
+            return 0.0
+        edge = "right" if direction > 0 else "left"
+        activity = analysis.edge_activity.get(edge)
+        if activity is None:
+            return 0.0
+        return activity.parallel * 0.35 + activity.confidence * 0.35 + activity.coverage * 0.30

@@ -28,6 +28,9 @@ class SpatialRenderer(Protocol):
     def set_front_ambient_strip(self, colors: np.ndarray, intensity: float) -> None:
         ...
 
+    def set_ambient_spill_scene_boost(self, score: float, color: tuple[int, int, int]) -> None:
+        ...
+
     def front_ambient_led_count(self) -> int:
         ...
 
@@ -58,12 +61,16 @@ class VectorizedSpatialRenderer:
     def __init__(self, config: EngineConfig, topology: SpatialRoomTopology):
         self.config = config
         self.topology = topology
-        self.accepts_front_ambient_strip_sample = False
+        self.accepts_front_ambient_strip_sample = True
         self.waves: list[SpatialLightWave] = []
         self.previous_leds = np.zeros((topology.total, 3), dtype=np.float32)
         self.tv_frame: np.ndarray | None = None
         self.front_ambient_color = np.zeros(3, dtype=np.float32)
+        self.front_ambient_strip_colors: np.ndarray | None = None
         self.front_ambient_intensity = 0.0
+        self._front_ambient_scene_luma = 0.0
+        self._ambient_side_spill_boost = 0.0
+        self._ambient_side_spill_scene_color = np.zeros(3, dtype=np.float32)
         self._spatial_mask = np.array([mode in {"spatial", "blend"} for mode in topology.sync_modes], dtype=bool)
         self._tv_mask = np.array([mode in {"tv_image", "blend"} for mode in topology.sync_modes], dtype=bool)
         self._blend = topology.strip_blend.reshape(-1, 1)
@@ -146,16 +153,35 @@ class VectorizedSpatialRenderer:
 
     def set_front_ambient_strip(self, colors: np.ndarray, intensity: float) -> None:
         if colors.size:
-            self.front_ambient_color = np.mean(colors.astype(np.float32), axis=0)
+            target = np.clip(colors.astype(np.float32), 0.0, 1.0)
+            self._update_ambient_side_spill_boost(target, intensity)
+            if self.front_ambient_strip_colors is None or self.front_ambient_strip_colors.shape != target.shape:
+                self.front_ambient_strip_colors = target
+            else:
+                self.front_ambient_strip_colors = self.front_ambient_strip_colors * 0.70 + target * 0.30
+            self.front_ambient_color = np.mean(self.front_ambient_strip_colors, axis=0)
             self.front_ambient_intensity = max(self.front_ambient_intensity * 0.8, float(np.clip(intensity, 0.0, 1.0)))
 
+    def set_ambient_spill_scene_boost(self, score: float, color: tuple[int, int, int]) -> None:
+        score = float(np.clip(score, 0.0, 1.0))
+        target_color = np.array(color, dtype=np.float32) / 255.0
+        if score <= 0.0 or float(np.max(target_color)) <= 0.001:
+            self._ambient_side_spill_boost *= 0.92
+            return
+        self._ambient_side_spill_boost = max(self._ambient_side_spill_boost * 0.88, score)
+        if float(np.max(self._ambient_side_spill_scene_color)) <= 0.001:
+            self._ambient_side_spill_scene_color = target_color
+        else:
+            self._ambient_side_spill_scene_color = self._ambient_side_spill_scene_color * 0.65 + target_color * 0.35
+
     def front_ambient_led_count(self) -> int:
-        return max(1, int(np.count_nonzero(self._tv_mask)))
+        return max(1, int(self.topology.front_ambient_indices().size))
 
     def step(self, dt: float) -> np.ndarray:
         leds = np.zeros((self.topology.total, 3), dtype=np.float32)
         self._render_spatial_waves(leds, dt)
         self._apply_tv_sync(leds)
+        self._render_front_ambient(leds, dt)
         leds = np.clip(leds, 0.0, 1.0)
         alpha = self.config.color_smoothing
         leds = self.previous_leds * alpha + leds * (1.0 - alpha)
@@ -175,12 +201,19 @@ class VectorizedSpatialRenderer:
                 continue
             active.append(wave)
             distances = np.linalg.norm(positions - wave.origin.reshape(1, 3), axis=1)
-            if wave.kind in {"flash", "explosion", "impact_pulse"}:
+            if wave.kind in {"flash", "explosion"}:
                 fill_radius = max(wave.spread, travelled + wave.spread)
                 envelope = np.exp(-(distances**2) / (2.0 * fill_radius**2))
+            elif wave.kind == "impact_pulse":
+                fill_radius = max(self.topology.room_diagonal(), travelled + wave.spread)
+                local = np.exp(-(distances**2) / (2.0 * fill_radius**2))
+                collapse = max(0.0, 1.0 - wave.age / max(0.2, wave.width))
+                envelope = np.maximum(local, 0.45 * collapse)
             elif wave.kind == "shockwave":
                 ring_width = max(wave.spread * 0.45, wave.width * 0.08)
-                envelope = np.exp(-((distances - travelled) ** 2) / (2.0 * ring_width**2))
+                ring = np.exp(-((distances - travelled) ** 2) / (2.0 * ring_width**2))
+                room_flash = max(0.0, 1.0 - travelled / max(0.1, wave.radius_limit)) * 0.32
+                envelope = np.maximum(ring, room_flash)
             elif wave.kind in {"directional_sweep", "scene_wipe"}:
                 axis = positions[:, 0] if abs(wave.direction_hint) >= 0 else positions[:, 2]
                 room = self.topology.spatial.room
@@ -206,6 +239,9 @@ class VectorizedSpatialRenderer:
                 envelope = np.exp(-((distances - travelled * 0.45) ** 2) / (2.0 * (wave.spread * 2.5) ** 2)) * spiral
             elif wave.kind in {"color_bloom", "lightning", "ember_particles"}:
                 envelope = np.exp(-(distances**2) / (2.0 * max(wave.spread * (4.0 if wave.kind == "color_bloom" else 1.0), 0.1) ** 2))
+                if wave.kind == "lightning" and wave.intensity >= 0.72:
+                    strobe = 1.0 if int(wave.age * 28.0 + wave.phase * 7.0) % 2 == 0 else 0.0
+                    envelope = np.maximum(envelope, strobe * wave.intensity * 0.55)
             else:
                 envelope = np.exp(-((distances - travelled) ** 2) / (2.0 * wave.spread**2))
             travel_fade = max(0.0, 1.0 - travelled / max(0.1, wave.radius_limit))
@@ -215,9 +251,85 @@ class VectorizedSpatialRenderer:
             else:
                 leds[self._spatial_mask] += envelope[self._spatial_mask].reshape(-1, 1) * contribution
         self.waves = active
-        if self.front_ambient_intensity > self.config.wave_min_intensity:
-            leds[self._tv_mask] += self.front_ambient_color * self.front_ambient_intensity
-            self.front_ambient_intensity *= 0.92 ** (dt * 30.0)
+
+    def _render_front_ambient(self, leds: np.ndarray, dt: float) -> None:
+        if self.front_ambient_intensity <= self.config.wave_min_intensity:
+            return
+        ambient = self._front_ambient_led_colors()
+        ambient_mask = np.any(ambient > 0.0, axis=1) & self._spatial_mask
+        leds[ambient_mask] += ambient[ambient_mask]
+        if self.config.enabled_effects.get("ambient_side_spill", True):
+            spill_source = ambient
+            if self._ambient_side_spill_boost > 0.05 and float(np.max(self._ambient_side_spill_scene_color)) > 0.001:
+                spill_source = self._ambient_with_scene_boost_color(ambient)
+            spill = self.topology.ambient_extension_from_leds(
+                spill_source,
+                strength_boost=self._ambient_side_spill_boost,
+                reach_boost=self._ambient_side_spill_boost,
+            )
+            spill_mask = np.any(spill > 0.0, axis=1)
+            leds[spill_mask] = np.maximum(leds[spill_mask], spill[spill_mask])
+            self._ambient_side_spill_boost *= 0.94 ** (dt * 30.0)
+        self.front_ambient_intensity *= 0.92 ** (dt * 30.0)
+
+    def _ambient_with_scene_boost_color(self, ambient: np.ndarray) -> np.ndarray:
+        tinted = ambient.copy()
+        idx = self.topology.front_ambient_indices()
+        if idx.size == 0:
+            return tinted
+        active = idx[np.any(tinted[idx] > 0.0, axis=1)]
+        if active.size == 0:
+            return tinted
+        level = np.max(tinted[active], axis=1, keepdims=True)
+        scene = self._ambient_side_spill_scene_color.reshape(1, 3)
+        blend = min(0.90, self._ambient_side_spill_boost * 1.05)
+        tinted[active] = tinted[active] * (1.0 - blend) + scene * np.maximum(level, 0.08) * blend
+        return tinted
+
+    def _update_ambient_side_spill_boost(self, colors: np.ndarray, intensity: float) -> None:
+        luminance = colors[:, 0] * 0.2126 + colors[:, 1] * 0.7152 + colors[:, 2] * 0.0722
+        mean_luma = float(np.mean(luminance)) * float(np.clip(intensity, 0.0, 1.0))
+        previous_luma = self._front_ambient_scene_luma
+        self._front_ambient_scene_luma = previous_luma * 0.78 + mean_luma * 0.22
+        if mean_luma <= self.config.front_ambient_min_brightness:
+            self._ambient_side_spill_boost *= 0.82
+            return
+
+        color_mean = np.mean(colors, axis=0)
+        color_level = float(np.max(color_mean))
+        if color_level <= 0.001:
+            self._ambient_side_spill_boost *= 0.82
+            return
+
+        chroma = colors / np.maximum(np.max(colors, axis=1, keepdims=True), 0.001)
+        uniformity = 1.0 - float(np.mean(np.std(chroma, axis=0)))
+        saturation = (float(np.max(color_mean)) - float(np.min(color_mean))) / max(color_level, 0.001)
+        rising = max(0.0, mean_luma - previous_luma)
+        uniform_factor = np.clip((uniformity - 0.55) / 0.45, 0.0, 1.0)
+        rise_factor = np.clip(rising / 0.045, 0.0, 1.0)
+        brightness_factor = np.clip((mean_luma - self.config.front_ambient_min_brightness) / 0.45, 0.0, 1.0)
+        color_factor = np.clip(0.35 + saturation * 0.65, 0.0, 1.0)
+        target_boost = float(uniform_factor * rise_factor * brightness_factor * color_factor)
+        self._ambient_side_spill_boost = max(self._ambient_side_spill_boost * 0.82, target_boost)
+
+    def _front_ambient_led_colors(self) -> np.ndarray:
+        colors = np.zeros((self.topology.total, 3), dtype=np.float32)
+        idx = self.topology.front_ambient_indices()
+        if idx.size == 0:
+            return colors
+        if self.front_ambient_strip_colors is not None and self.config.front_ambient_source == "top_strip":
+            sampled = self._resampled_front_ambient_colors(idx.size)
+            colors[idx] = sampled * self.front_ambient_intensity
+        else:
+            colors[idx] = self.front_ambient_color * self.front_ambient_intensity
+        return colors
+
+    def _resampled_front_ambient_colors(self, count: int) -> np.ndarray:
+        assert self.front_ambient_strip_colors is not None
+        if len(self.front_ambient_strip_colors) == count:
+            return self.front_ambient_strip_colors
+        sampled = cv2.resize(self.front_ambient_strip_colors.reshape(1, -1, 3), (count, 1), interpolation=cv2.INTER_AREA)
+        return sampled.reshape(count, 3)
 
     def _apply_tv_sync(self, leds: np.ndarray) -> None:
         if not np.any(self._tv_mask):
@@ -227,10 +339,6 @@ class VectorizedSpatialRenderer:
         blend = np.array([mode == "blend" for mode in self.topology.sync_modes], dtype=bool)
         leds[tv_only] = tv_colors[tv_only]
         leds[blend] = leds[blend] * (1.0 - self._blend[blend]) + tv_colors[blend] * self._blend[blend]
-        if self.config.enabled_effects.get("ambient_side_spill", True):
-            ambient = self.topology.ambient_extension_colors(self.tv_frame)
-            ambient_mask = np.any(ambient > 0.0, axis=1)
-            leds[ambient_mask] = np.maximum(leds[ambient_mask], ambient[ambient_mask])
 
     def _radius_limit(self, intensity: float, kind: str) -> float:
         diagonal = max(0.1, self.topology.room_diagonal())

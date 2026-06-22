@@ -8,6 +8,7 @@ import unittest
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -143,6 +144,8 @@ class EditorServerCase(unittest.TestCase):
         strip["device_id"] = "main"
         strip["sync_mode"] = "tv_image"
         strip["blend"] = 0.8
+        strip["tv_fill"] = 0.4
+        strip["tv_fill_spatial"] = True
         self.assertTrue(self.post_spatial(spatial)["ok"])
         saved = self.saved_spatial()["strips"][0]
         self.assertEqual(saved["start_u"], 1.25)
@@ -151,6 +154,8 @@ class EditorServerCase(unittest.TestCase):
         self.assertEqual(saved["device_id"], "main")
         self.assertEqual(saved["sync_mode"], "tv_image")
         self.assertEqual(saved["blend"], 0.8)
+        self.assertEqual(saved["tv_fill"], 0.4)
+        self.assertTrue(saved["tv_fill_spatial"])
         self.assertGreaterEqual(self.saved_spatial()["devices"][0]["led_count"], 30)
 
     def test_extension_mode_fields_persist(self) -> None:
@@ -187,24 +192,137 @@ class EditorServerCase(unittest.TestCase):
     def test_effect_toggles_persist_and_update_preview_runtime(self) -> None:
         started = self.post_path("/api/preview/start")
         self.assertTrue(started["running"], started)
-        payload = self.post_json("/api/effects", {"enabled_effects": {"shockwave": False, "ambient_side_spill": False}})
+        payload = self.post_json(
+            "/api/effects",
+            {
+                "enabled_effects": {"shockwave": False, "ambient_side_spill": False},
+                "effect_sensitivity": {"shockwave": 0.85},
+                "front_ambient_coverage": 0.35,
+                "ambient_side_spill_base_intensity": 0.25,
+                "ambient_side_spill_boost_intensity": 1.6,
+            },
+        )
         self.assertTrue(payload["ok"], payload)
         self.assertFalse(payload["enabled_effects"]["shockwave"])
         self.assertFalse(payload["enabled_effects"]["ambient_side_spill"])
+        self.assertEqual(payload["effect_sensitivity"]["shockwave"], 0.85)
+        self.assertEqual(payload["front_ambient_coverage"], 0.35)
+        self.assertEqual(payload["ambient_side_spill_base_intensity"], 0.25)
+        self.assertEqual(payload["ambient_side_spill_boost_intensity"], 1.6)
         saved = json.loads(self.config_path.read_text(encoding="utf-8"))
         self.assertFalse(saved["enabled_effects"]["shockwave"])
+        self.assertEqual(saved["effect_sensitivity"]["shockwave"], 0.85)
+        self.assertEqual(saved["front_ambient_coverage"], 0.35)
+        self.assertEqual(saved["ambient_side_spill_base_intensity"], 0.25)
+        self.assertEqual(saved["ambient_side_spill_boost_intensity"], 1.6)
         runtime = SpatialEditorHandler.preview_manager.runtime
         self.assertIsNotNone(runtime)
         self.assertFalse(runtime.config.enabled_effects["shockwave"])
+        self.assertEqual(runtime.config.effect_sensitivity["shockwave"], 0.85)
+        self.assertEqual(runtime.config.front_ambient_coverage, 0.35)
+        self.assertEqual(runtime.config.ambient_side_spill_base_intensity, 0.25)
+        self.assertEqual(runtime.config.ambient_side_spill_boost_intensity, 1.6)
         status = self.get_json("/api/preview/status")
         self.assertIn("enabled_effects", status)
         self.assertFalse(status["enabled_effects"]["shockwave"])
+        self.assertEqual(status["effect_sensitivity"]["shockwave"], 0.85)
+        self.assertEqual(status["front_ambient_coverage"], 0.35)
+        self.assertEqual(status["ambient_side_spill_base_intensity"], 0.25)
+        self.assertEqual(status["ambient_side_spill_boost_intensity"], 1.6)
+
+    def test_preview_status_reports_saved_effects_when_stopped(self) -> None:
+        payload = self.post_json(
+            "/api/effects",
+            {"enabled_effects": {"lightning": False}, "effect_sensitivity": {"lightning": 0.9}, "ambient_side_spill_base_intensity": 0.2},
+        )
+        self.assertTrue(payload["ok"], payload)
+        status = self.get_json("/api/preview/status")
+        self.assertFalse(status["running"])
+        self.assertFalse(status["enabled_effects"]["lightning"])
+        self.assertEqual(status["effect_sensitivity"]["lightning"], 0.9)
+        self.assertEqual(status["ambient_side_spill_base_intensity"], 0.2)
+
+    def test_config_save_effects_update_running_preview_runtime(self) -> None:
+        started = self.post_path("/api/preview/start")
+        self.assertTrue(started["running"], started)
+        spatial = self.get_config()["spatial"]
+        payload = self.post_json(
+            "/api/config",
+            {
+                "spatial": spatial,
+                "enabled_effects": {"portal_vortex": False, "front_ambient": False},
+                "effect_sensitivity": {"portal_vortex": 0.8},
+                "ambient_side_spill_boost_intensity": 1.4,
+            },
+        )
+        self.assertTrue(payload["ok"], payload)
+        runtime = SpatialEditorHandler.preview_manager.runtime
+        self.assertIsNotNone(runtime)
+        self.assertFalse(runtime.config.enabled_effects["portal_vortex"])
+        self.assertFalse(runtime.config.enabled_effects["front_ambient"])
+        self.assertEqual(runtime.config.effect_sensitivity["portal_vortex"], 0.8)
+        self.assertEqual(runtime.config.ambient_side_spill_boost_intensity, 1.4)
+        status = self.get_json("/api/preview/status")
+        self.assertFalse(status["enabled_effects"]["portal_vortex"])
+        self.assertEqual(status["effect_sensitivity"]["portal_vortex"], 0.8)
+        self.assertEqual(status["ambient_side_spill_boost_intensity"], 1.4)
+
+    def test_effect_toggle_removes_active_disabled_preview_waves(self) -> None:
+        class FakeRuntime:
+            running = True
+
+            def __init__(self) -> None:
+                self.config = EngineConfig()
+                self.event_detector = SimpleNamespace(config=self.config)
+                self.wave_engine = SimpleNamespace(
+                    waves=[
+                        SimpleNamespace(kind="lightning", intensity=1.0),
+                        SimpleNamespace(kind="spill", intensity=1.0),
+                    ],
+                    front_ambient_intensity=1.0,
+                    front_ambient_strip_colors=np.ones((2, 3), dtype=np.float32),
+                    _front_ambient_led_cache=[0, 1, 2],
+                    _front_ambient_led_set_cache={0, 1, 2},
+                )
+
+            def stop(self) -> None:
+                self.running = False
+
+        fake = FakeRuntime()
+        with SpatialEditorHandler.preview_manager.lock:
+            SpatialEditorHandler.preview_manager.runtime = fake
+        payload = self.post_json(
+            "/api/effects",
+            {"enabled_effects": {"lightning": False, "front_ambient": False}, "front_ambient_coverage": 0.5},
+        )
+        self.assertTrue(payload["ok"], payload)
+        self.assertFalse(fake.config.enabled_effects["lightning"])
+        self.assertEqual(fake.config.front_ambient_coverage, 0.5)
+        self.assertEqual([wave.kind for wave in fake.wave_engine.waves], ["spill"])
+        self.assertEqual(fake.wave_engine.front_ambient_intensity, 0.0)
+        self.assertIsNone(fake.wave_engine.front_ambient_strip_colors)
+        self.assertIsNone(fake.wave_engine._front_ambient_led_cache)
+        self.assertIsNone(fake.wave_engine._front_ambient_led_set_cache)
+
+    def test_preview_simulation_patterns_are_listed_and_triggerable(self) -> None:
+        config_payload = self.get_config()
+        patterns = config_payload.get("simulation_patterns", [])
+        names = {item["effect"] for item in patterns}
+        self.assertIn("lightning", names)
+        self.assertIn("ambient_side_spill", names)
+        self.assertIn("ambient_side_spill_boost", names)
+        started = self.post_path("/api/preview/start")
+        self.assertTrue(started["running"], started)
+        triggered = self.post_json("/api/preview/trigger", {"effect": "lightning"})
+        self.assertTrue(triggered["ok"], triggered)
+        self.assertEqual(triggered["effect"], "lightning")
 
     def test_preview_status_reports_triggered_effects(self) -> None:
         manager = SpatialEditorHandler.preview_manager
         with manager.lock:
             manager.last_snapshot = RuntimeSnapshot(
                 events=[
+                    LightEvent(edge="top", intensity=0.3, color=(50, 60, 70), kind="front_ambient", effect_id="front_ambient"),
                     LightEvent(edge="left", intensity=0.7, color=(255, 80, 20), kind="energy_trail", effect_id="energy_trail", primary=True),
                     LightEvent(edge="top", intensity=0.4, color=(255, 180, 80), kind="ember_particles", effect_id="ember_particles", secondary=True),
                 ]
@@ -240,6 +358,44 @@ class EditorServerCase(unittest.TestCase):
         self.assertGreaterEqual(status.get("led_revision", 0), 1)
         stopped = self.post_path("/api/preview/stop")
         self.assertFalse(stopped["running"])
+
+    def test_simulation_preview_endpoint_overrides_live_hyperhdr_setting(self) -> None:
+        raw = json.loads(self.config_path.read_text(encoding="utf-8"))
+        raw["simulate_input"] = False
+        raw["hyperhdr_input_mode"] = "websocket"
+        raw["hyperhdr_ws_port"] = 9
+        self.config_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+
+        started = self.post_path("/api/preview/start-simulation")
+        self.assertTrue(started["running"], started)
+        self.assertEqual(started["mode"], "simulation")
+        runtime = SpatialEditorHandler.preview_manager.runtime
+        self.assertIsNotNone(runtime)
+        self.assertTrue(runtime.config.simulate_input)
+
+        triggered = self.post_json("/api/preview/trigger", {"effect": "lightning"})
+        self.assertTrue(triggered["ok"], triggered)
+        status = self.get_json("/api/preview/status")
+        self.assertEqual(status["preview_mode"], "simulation")
+
+        stopped = self.post_path("/api/preview/stop-simulation")
+        self.assertFalse(stopped["running"])
+
+    def test_preview_pattern_loop_can_start_and_stop_without_stopping_preview(self) -> None:
+        started = self.post_path("/api/preview/start-simulation")
+        self.assertTrue(started["running"], started)
+        looped = self.post_json("/api/preview/trigger", {"effect": "loop:lightning"})
+        self.assertTrue(looped["ok"], looped)
+        self.assertEqual(looped["looping_effect"], "lightning")
+        status = self.get_json("/api/preview/status")
+        self.assertTrue(status["running"])
+        self.assertEqual(status["looping_effect"], "lightning")
+        stopped_pattern = self.post_json("/api/preview/trigger", {"effect": "idle"})
+        self.assertTrue(stopped_pattern["ok"], stopped_pattern)
+        self.assertEqual(stopped_pattern["looping_effect"], "")
+        status = self.get_json("/api/preview/status")
+        self.assertTrue(status["running"])
+        self.assertEqual(status["looping_effect"], "")
 
     def test_live_preview_does_not_publish_black_led_revision_before_first_frame(self) -> None:
         raw = json.loads(self.config_path.read_text(encoding="utf-8"))
@@ -294,13 +450,30 @@ class EditorServerCase(unittest.TestCase):
         self.assertIn(b'id="view-2d"', index)
         self.assertIn(b'id="view-3d"', index)
         self.assertIn(b'id="scene3d"', index)
+        self.assertIn(b'id="start-simulation"', index)
+        self.assertIn(b'id="stop-simulation"', index)
+        self.assertIn(b'id="stop-pattern"', index)
         self.assertIn(b'id="effect-toggles"', index)
+        self.assertIn(b'id="effect-sensitivity"', index)
+        self.assertIn(b'id="ambient-side-spill-base-intensity"', index)
+        self.assertIn(b'id="ambient-side-spill-boost-intensity"', index)
+        self.assertIn(b'id="effect-patterns"', index)
         self.assertIn(b'id="triggered-effects"', index)
         self.assertIn(b'id="active-effects"', index)
         self.assertIn(b'type="importmap"', index)
         self.assertIn(b"/vendor/three.module.js", index)
         self.assertIn(b"/api/preview/frame.jpg", app)
         self.assertIn(b"/api/effects", app)
+        self.assertIn(b"effect_sensitivity", app)
+        self.assertIn(b"ambient_side_spill_base_intensity", app)
+        self.assertIn(b"ambient_side_spill_boost_intensity", app)
+        self.assertIn(b"TRIGGER_EFFECTS", app)
+        self.assertIn(b"/api/preview/trigger", app)
+        self.assertIn(b"pendingEffectOverrides", app)
+        self.assertIn(b"/api/preview/start-simulation", app)
+        self.assertIn(b"/api/preview/stop-simulation", app)
+        self.assertIn(b"loop:", app)
+        self.assertIn(b"looping_effect", app)
         self.assertIn(b"active_effect_counts", app)
         self.assertIn(b"triggered_effects", app)
         self.assertIn(b"Primary:", app)
@@ -311,6 +484,14 @@ class EditorServerCase(unittest.TestCase):
         self.assertIn(b"Max LED", app)
         self.assertIn(b"mirrorHorizontal", app)
         self.assertIn(b"drawViewHud", app)
+        self.assertIn(b".effect-range", styles)
+        self.assertIn(b".effect-panel", styles)
+        self.assertIn(b".effect-sensitivity-row", styles)
+        self.assertIn(b'id="strip-tv-fill"', index)
+        self.assertIn(b'id="strip-tv-fill-row"', index)
+        self.assertIn(b'id="strip-tv-fill-spatial"', index)
+        self.assertIn(b"tv_fill", app)
+        self.assertIn(b"tv_fill_spatial", app)
         self.assertIn(b'id="strip-extension-mode"', index)
         self.assertIn(b"extension_strength", app)
         self.assertIn(b"createLightPreview3d", app)

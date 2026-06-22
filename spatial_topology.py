@@ -108,6 +108,9 @@ class SpatialRoomTopology:
         return Origin(led, (-1, 1), radius, f"screen-{edge}")
 
     def event_origin_point(self, edge: str) -> np.ndarray:
+        projected = self._tv_projection_edge_point(edge)
+        if projected is not None:
+            return projected
         tv = self.spatial.tv
         left_u = tv.center_u - tv.width / 2.0
         right_u = tv.center_u + tv.width / 2.0
@@ -120,6 +123,21 @@ class SpatialRoomTopology:
         if edge == "bottom":
             return self.wall_point(tv.wall, tv.center_u, bottom_v)
         return self.wall_point(tv.wall, tv.center_u, top_v)
+
+    def _tv_projection_edge_point(self, edge: str) -> np.ndarray | None:
+        points: list[np.ndarray] = []
+        for strip in self.spatial.strips:
+            role = self.effective_tv_role_for_strip(strip.id)
+            if role != edge or strip.sync_mode not in {"tv_image", "blend"} or not strip.tv_fill_spatial:
+                continue
+            start, end = self.strip_ranges.get(strip.id, (0, 0))
+            idx = np.arange(start, end, dtype=np.int32)
+            fill_idx = self._tv_fill_indices(idx, role, strip)
+            if fill_idx.size:
+                points.append(np.mean(self.positions[fill_idx], axis=0))
+        if not points:
+            return None
+        return np.mean(np.stack(points, axis=0), axis=0).astype(np.float32)
 
     def nearest_led_to_point(self, point: np.ndarray) -> int:
         if self.total <= 0:
@@ -162,6 +180,55 @@ class SpatialRoomTopology:
         ]
         return result or self.wall_ranges.get(tv.wall, [])
 
+    def front_ambient_indices(self) -> np.ndarray:
+        tv_indices = np.array(self.tv_wall_indices(), dtype=np.int32)
+        if tv_indices.size == 0:
+            return tv_indices
+        coverage = float(np.clip(self.config.front_ambient_coverage, 0.0, 1.0))
+        if coverage <= 0.0:
+            return np.array([], dtype=np.int32)
+        if coverage >= 0.999:
+            wall_indices = self._front_ambient_source_wall_indices(tv_indices)
+            return wall_indices
+        wall_indices = self._front_ambient_source_wall_indices(tv_indices)
+        center = self.wall_u[tv_indices[len(tv_indices) // 2]]
+        tv_width = max(0.001, self.spatial.tv.width)
+        ambient_width = tv_width + (self._wall_span(self.spatial.tv.wall) - tv_width) * coverage
+        mask = np.abs(self.wall_u[wall_indices] - center) <= ambient_width / 2.0
+        selected = wall_indices[mask]
+        return selected if selected.size else tv_indices
+
+    def ambient_extension_from_leds(
+        self,
+        source_leds: np.ndarray,
+        strength_boost: float = 0.0,
+        reach_boost: float = 0.0,
+    ) -> np.ndarray:
+        colors = np.zeros((self.total, 3), dtype=np.float32)
+        if source_leds.size == 0 or self.total <= 0:
+            return colors
+        boost_intensity = float(np.clip(self.config.ambient_side_spill_boost_intensity, 0.0, 2.0))
+        strength_boost = float(np.clip(strength_boost, 0.0, 1.0)) * boost_intensity
+        reach_boost = float(np.clip(reach_boost, 0.0, 1.0)) * boost_intensity
+        base_intensity = float(np.clip(self.config.ambient_side_spill_base_intensity, 0.0, 1.0))
+        for strip in self.spatial.strips:
+            parent_id = strip.extends_strip_id.strip()
+            if strip.sync_mode != "spatial" or not parent_id or strip.extension_mode == "effects_only":
+                continue
+            start, end = self.strip_ranges.get(strip.id, (0, 0))
+            parent_start, parent_end = self.strip_ranges.get(parent_id, (0, 0))
+            idx = np.arange(start, end, dtype=np.int32)
+            parent_idx = np.arange(parent_start, parent_end, dtype=np.int32)
+            if idx.size == 0 or parent_idx.size == 0:
+                continue
+            edge_offset = self._nearest_parent_edge_offset(idx, parent_idx)
+            edge_color = source_leds[parent_idx[edge_offset]].reshape(1, 3)
+            fade = self._fade_from_parent_edge(idx, parent_idx[edge_offset], strip, reach_boost=reach_boost).reshape(-1, 1)
+            strength = float(np.clip(strip.extension_strength * (1.0 + strength_boost * 0.85), 0.0, 1.0))
+            output_cap = float(np.clip(base_intensity * (1.0 + strength_boost * 0.85), 0.0, 1.0))
+            colors[idx] = np.clip(edge_color * fade * strength * base_intensity, 0.0, output_cap)
+        return colors
+
     def tv_sample_colors(self, frame_bgr: np.ndarray | None) -> np.ndarray:
         colors = np.zeros((self.total, 3), dtype=np.float32)
         if frame_bgr is None or frame_bgr.size == 0 or self.total <= 0:
@@ -171,15 +238,16 @@ class SpatialRoomTopology:
             role = self.effective_tv_role_for_strip(strip.id)
             if role == "none" or strip.sync_mode not in {"tv_image", "blend"}:
                 continue
-            if strip.extends_strip_id.strip() and strip.extension_mode == "effects_only":
-                continue
             start, end = self.strip_ranges.get(strip.id, (0, 0))
             idx = np.arange(start, end, dtype=np.int32)
             if idx.size:
-                sampled = self._sample_tv_role(frame, idx, role)
+                fill_idx = self._tv_fill_indices(idx, role, strip)
+                if fill_idx.size == 0:
+                    continue
+                sampled = self._sample_tv_role(frame, fill_idx, role, strip)
                 if strip.extends_strip_id.strip():
-                    sampled = self._apply_extension_mode(sampled, idx, role, strip)
-                colors[idx] = sampled
+                    sampled = self._apply_extension_mode(sampled, fill_idx, role, strip)
+                colors[fill_idx] = sampled
 
         roles = np.array(self.effective_tv_roles, dtype=object)
         tv_capable = np.array([mode in {"tv_image", "blend"} for mode in self.sync_modes], dtype=bool)
@@ -299,6 +367,18 @@ class SpatialRoomTopology:
             dtype=bool,
         )
 
+    def _wall_span(self, wall: str) -> float:
+        room = self.spatial.room
+        return room.width if wall in {"front", "rear"} else room.depth
+
+    def _front_ambient_source_wall_indices(self, fallback: np.ndarray) -> np.ndarray:
+        indices = [
+            idx
+            for idx in self.wall_ranges.get(self.spatial.tv.wall, fallback.tolist())
+            if not self.strips.get(self.strip_ids[idx]).extends_strip_id.strip()
+        ]
+        return np.array(indices, dtype=np.int32) if indices else fallback
+
     def _sample_tv_rect(self, frame: np.ndarray, idx: np.ndarray) -> np.ndarray:
         height, width = frame.shape[:2]
         tv = self.spatial.tv
@@ -312,11 +392,11 @@ class SpatialRoomTopology:
         ys = np.clip(((1.0 - v_norm) * (height - 1)).astype(np.int32), 0, height - 1)
         return frame[ys, xs]
 
-    def _sample_tv_role(self, frame: np.ndarray, idx: np.ndarray, role: str) -> np.ndarray:
+    def _sample_tv_role(self, frame: np.ndarray, idx: np.ndarray, role: str, strip: SpatialStrip | None = None) -> np.ndarray:
         height, width = frame.shape[:2]
         sample_role = self._mirrored_sample_role(role)
         if role in {"top", "bottom"}:
-            progress = self._tv_edge_progress(idx, role)
+            progress = self._tv_edge_progress(idx, role, strip)
             if self.spatial.tv.mirror_horizontal:
                 progress = 1.0 - progress
             xs = np.clip(np.rint(progress * (width - 1)).astype(np.int32), 0, width - 1)
@@ -324,7 +404,7 @@ class SpatialRoomTopology:
             band = frame[:edge_h, :] if role == "top" else frame[height - edge_h :, :]
             sampled = band[:, xs].mean(axis=0)
         else:
-            progress = self._tv_edge_progress(idx, role)
+            progress = self._tv_edge_progress(idx, role, strip)
             ys = np.clip(np.rint((1.0 - progress) * (height - 1)).astype(np.int32), 0, height - 1)
             edge_w = max(1, int(round(width * 0.04)))
             band = frame[:, :edge_w] if sample_role == "left" else frame[:, width - edge_w :]
@@ -343,8 +423,10 @@ class SpatialRoomTopology:
     def _apply_extension_mode(self, colors: np.ndarray, idx: np.ndarray, role: str, strip: SpatialStrip) -> np.ndarray:
         strength = float(np.clip(strip.extension_strength, 0.0, 1.0))
         softness = float(np.clip(strip.extension_softness, 0.0, 1.0))
-        if strip.sync_mode == "spatial" or strip.extension_mode == "effects_only":
+        if strip.sync_mode == "spatial":
             return np.zeros_like(colors)
+        if strip.extension_mode == "effects_only":
+            return colors
         if strip.extension_mode == "edge_reach":
             distances = self._extension_distance_from_tv_edge(idx, role).reshape(-1, 1)
             intensity = np.max(colors, axis=1, keepdims=True)
@@ -360,6 +442,37 @@ class SpatialRoomTopology:
         desaturate = softness * 0.35
         softened = softened * (1.0 - desaturate) + luminance * desaturate
         return np.clip(softened * strength, 0.0, 1.0)
+
+    def _tv_fill_indices(self, idx: np.ndarray, role: str, strip: SpatialStrip) -> np.ndarray:
+        fill = float(np.clip(strip.tv_fill, 0.0, 1.0))
+        if idx.size == 0:
+            return idx
+        if role in {"top", "bottom"}:
+            axis = self.wall_u[idx]
+            tv_span = self.spatial.tv.width
+        else:
+            axis = self.wall_v[idx]
+            tv_span = self.spatial.tv.height
+        strip_min = float(np.min(axis))
+        strip_max = float(np.max(axis))
+        strip_span = max(0.001, strip_max - strip_min)
+        center = self._tv_fill_center(axis, role, strip)
+        width = min(strip_span, tv_span + max(0.0, strip_span - tv_span) * fill)
+        mask = np.abs(axis - center) <= width / 2.0 + 1e-5
+        if not np.any(mask):
+            target_count = max(1, int(round(idx.size * min(1.0, width / strip_span))))
+            order_center = idx.size // 2
+            half = target_count // 2
+            fallback = np.zeros(idx.size, dtype=bool)
+            fallback[max(0, order_center - half) : min(idx.size, order_center + half + 1)] = True
+            mask = fallback
+        return idx[mask]
+
+    def _tv_fill_center(self, axis: np.ndarray, role: str, strip: SpatialStrip) -> float:
+        if strip.tv_fill_spatial:
+            tv = self.spatial.tv
+            return float(tv.center_u if role in {"top", "bottom"} else tv.center_v)
+        return float((np.min(axis) + np.max(axis)) / 2.0)
 
     def _smooth_strip_colors(self, colors: np.ndarray, softness: float) -> np.ndarray:
         if colors.shape[0] <= 1 or softness <= 0.0:
@@ -377,7 +490,13 @@ class SpatialRoomTopology:
         distances = np.linalg.norm(parent_endpoints[:, None, :] - extension_endpoints[None, :, :], axis=2)
         return 0 if int(np.argmin(distances)) // 2 == 0 else parent_idx.size - 1
 
-    def _fade_from_parent_edge(self, idx: np.ndarray, parent_edge_idx: int, strip: SpatialStrip) -> np.ndarray:
+    def _fade_from_parent_edge(
+        self,
+        idx: np.ndarray,
+        parent_edge_idx: int,
+        strip: SpatialStrip,
+        reach_boost: float = 0.0,
+    ) -> np.ndarray:
         distances = np.linalg.norm(self.positions[idx] - self.positions[parent_edge_idx].reshape(1, 3), axis=1)
         if distances.size == 0:
             return distances
@@ -388,6 +507,7 @@ class SpatialRoomTopology:
         falloff = 5.5 + softness * 4.5
         if strip.extension_mode == "edge_reach":
             falloff += 2.0
+        falloff /= 1.0 + float(np.clip(reach_boost, 0.0, 2.0)) * 2.4
         return np.exp(-normalized * falloff).astype(np.float32)
 
     def _extension_distance_from_tv_edge(self, idx: np.ndarray, role: str) -> np.ndarray:
@@ -407,20 +527,12 @@ class SpatialRoomTopology:
         span = max(0.001, float(np.max(distances) - min_distance))
         return np.clip((distances - min_distance) / span, 0.0, 1.0).astype(np.float32)
 
-    def _tv_edge_progress(self, idx: np.ndarray, role: str) -> np.ndarray:
+    def _tv_edge_progress(self, idx: np.ndarray, role: str, strip: SpatialStrip | None = None) -> np.ndarray:
         tv = self.spatial.tv
         if role in {"top", "bottom"}:
             axis = self.wall_u[idx]
-            tv_min = tv.center_u - tv.width / 2.0
-            tv_max = tv.center_u + tv.width / 2.0
         else:
             axis = self.wall_v[idx]
-            tv_min = tv.center_v - tv.height / 2.0
-            tv_max = tv.center_v + tv.height / 2.0
-        span = max(0.001, tv_max - tv_min)
-        overlaps_tv_axis = np.any((axis >= tv_min) & (axis <= tv_max))
-        if overlaps_tv_axis:
-            return np.clip((axis - tv_min) / span, 0.0, 1.0).astype(np.float32)
         axis_min = float(np.min(axis))
         axis_max = float(np.max(axis))
         axis_span = axis_max - axis_min

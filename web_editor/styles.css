@@ -180,6 +180,23 @@ button.danger {
   gap: 6px 10px;
 }
 
+.effect-panel {
+  border-top: 1px solid #26384b;
+  padding: 7px 0;
+}
+
+.effect-panel:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.effect-panel summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
 .effect-toggle {
   display: grid;
   grid-template-columns: 16px 1fr;
@@ -192,6 +209,52 @@ button.danger {
   width: 16px;
   height: 16px;
   padding: 0;
+}
+
+.effect-sensitivity {
+  display: grid;
+  gap: 6px;
+}
+
+.effect-sensitivity-row {
+  display: grid;
+  grid-template-columns: minmax(92px, 1fr) 1.4fr 36px;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.effect-sensitivity-value {
+  text-align: right;
+  color: #9fb2c7;
+  font-variant-numeric: tabular-nums;
+}
+
+.effect-range {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 5px;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+
+.effect-pattern {
+  padding: 6px 7px;
+  font-size: 12px;
+  background: #1e4f7b;
+  border-color: #326faa;
+}
+
+.effect-pattern.active {
+  background: #3676b7;
+  border-color: #66b5ff;
+}
+
+.effect-stop {
+  margin-top: 8px;
+  background: #75313a;
+  border-color: #a64856;
 }
 
 .effect-live {

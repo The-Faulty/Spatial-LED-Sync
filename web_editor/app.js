@@ -32,10 +32,18 @@ let previewImage = null;
 let emptyDragStart = null;
 let activeView = "2d";
 let effectSaveTimer = null;
+let simulationPatterns = [];
+let loopingEffect = "";
+let effectSaveInFlight = false;
+let effectSaveAgain = false;
+let pendingEffectOverrides = {};
+let pendingSensitivityOverrides = {};
+let pendingAmbientSpillSettings = {};
 
 const EFFECT_LABELS = {
   front_ambient: "Front ambient",
   ambient_side_spill: "Ambient side spill",
+  ambient_side_spill_boost: "Ambient spill boost",
   spill: "Motion spill",
   top_color_exit: "Top color exit",
   flash: "Flash",
@@ -55,6 +63,25 @@ const EFFECT_LABELS = {
   negative_wave: "Negative wave",
 };
 
+const TRIGGER_EFFECTS = [
+  "spill",
+  "top_color_exit",
+  "flash",
+  "explosion",
+  "camera_pan",
+  "energy_trail",
+  "shockwave",
+  "directional_sweep",
+  "lightning",
+  "impact_pulse",
+  "color_bloom",
+  "flame_shimmer",
+  "underwater",
+  "portal_vortex",
+  "scene_wipe",
+  "negative_wave",
+];
+
 const fields = {
   roomWidth: document.querySelector("#room-width"),
   roomDepth: document.querySelector("#room-depth"),
@@ -66,8 +93,17 @@ const fields = {
   tvHeight: document.querySelector("#tv-height"),
   startPreview: document.querySelector("#start-preview"),
   stopPreview: document.querySelector("#stop-preview"),
+  startSimulation: document.querySelector("#start-simulation"),
+  stopSimulation: document.querySelector("#stop-simulation"),
   previewStatus: document.querySelector("#preview-status"),
   effectToggles: document.querySelector("#effect-toggles"),
+  effectSensitivity: document.querySelector("#effect-sensitivity"),
+  ambientSideSpillBase: document.querySelector("#ambient-side-spill-base-intensity"),
+  ambientSideSpillBaseValue: document.querySelector("#ambient-side-spill-base-value"),
+  ambientSideSpillBoost: document.querySelector("#ambient-side-spill-boost-intensity"),
+  ambientSideSpillBoostValue: document.querySelector("#ambient-side-spill-boost-value"),
+  effectPatterns: document.querySelector("#effect-patterns"),
+  stopPattern: document.querySelector("#stop-pattern"),
   triggeredEffects: document.querySelector("#triggered-effects"),
   activeEffects: document.querySelector("#active-effects"),
   view2d: document.querySelector("#view-2d"),
@@ -87,6 +123,10 @@ const fields = {
   stripDeviceStart: document.querySelector("#strip-device-start"),
   stripSyncMode: document.querySelector("#strip-sync-mode"),
   stripTvRole: document.querySelector("#strip-tv-role"),
+  stripTvFillRow: document.querySelector("#strip-tv-fill-row"),
+  stripTvFill: document.querySelector("#strip-tv-fill"),
+  stripTvFillSpatialRow: document.querySelector("#strip-tv-fill-spatial-row"),
+  stripTvFillSpatial: document.querySelector("#strip-tv-fill-spatial"),
   stripExtends: document.querySelector("#strip-extends"),
   stripExtensionMode: document.querySelector("#strip-extension-mode"),
   stripExtensionStrength: document.querySelector("#strip-extension-strength"),
@@ -111,8 +151,12 @@ async function loadConfig() {
   const payload = await response.json();
   config = payload.config;
   spatial = payload.spatial;
+  simulationPatterns = payload.simulation_patterns || [];
   bindForm();
   renderEffectToggles();
+  renderEffectSensitivity();
+  syncAmbientSpillControls();
+  renderEffectPatterns();
   await loadPreviewColors();
   syncLightPreview3d();
   renderSpatial();
@@ -146,6 +190,7 @@ function renderEffectToggles() {
     checkbox.dataset.effect = effect;
     checkbox.addEventListener("change", () => {
       config.enabled_effects[effect] = checkbox.checked;
+      pendingEffectOverrides[effect] = checkbox.checked;
       scheduleEffectSave();
     });
     const text = document.createElement("span");
@@ -155,27 +200,173 @@ function renderEffectToggles() {
   }
 }
 
+function syncEffectToggleControls() {
+  const enabled = config?.enabled_effects || {};
+  for (const checkbox of fields.effectToggles.querySelectorAll("input[data-effect]")) {
+    const effect = checkbox.dataset.effect;
+    checkbox.checked = Boolean(enabled[effect]);
+    checkbox.disabled = effectSaveInFlight;
+  }
+  syncEffectSensitivityControls();
+  syncAmbientSpillControls();
+}
+
+function renderEffectSensitivity() {
+  fields.effectSensitivity.innerHTML = "";
+  for (const effect of TRIGGER_EFFECTS) {
+    const row = document.createElement("label");
+    row.className = "effect-sensitivity-row";
+    const text = document.createElement("span");
+    text.textContent = effectLabel(effect);
+    const value = document.createElement("span");
+    value.className = "effect-sensitivity-value";
+    const slider = document.createElement("input");
+    slider.type = "range";
+    slider.min = "0";
+    slider.max = "1";
+    slider.step = "0.05";
+    slider.dataset.effectSensitivity = effect;
+    slider.addEventListener("input", () => {
+      const next = Number(slider.value);
+      config.effect_sensitivity[effect] = next;
+      pendingSensitivityOverrides[effect] = next;
+      value.textContent = next.toFixed(2);
+      scheduleEffectSave();
+    });
+    row.append(text, slider, value);
+    fields.effectSensitivity.append(row);
+  }
+  syncEffectSensitivityControls();
+}
+
+function syncEffectSensitivityControls() {
+  const sensitivity = config?.effect_sensitivity || {};
+  for (const slider of fields.effectSensitivity.querySelectorAll("input[data-effect-sensitivity]")) {
+    const effect = slider.dataset.effectSensitivity;
+    const value = Number(sensitivity[effect] ?? 0.5);
+    slider.value = String(value);
+    slider.disabled = effectSaveInFlight;
+    const display = slider.parentElement?.querySelector(".effect-sensitivity-value");
+    if (display) display.textContent = value.toFixed(2);
+  }
+}
+
+function syncAmbientSpillControls() {
+  if (!config || !fields.ambientSideSpillBase || !fields.ambientSideSpillBoost) return;
+  const base = Number(config.ambient_side_spill_base_intensity ?? 0.45);
+  const boost = Number(config.ambient_side_spill_boost_intensity ?? 1.0);
+  fields.ambientSideSpillBase.value = String(base);
+  fields.ambientSideSpillBoost.value = String(boost);
+  fields.ambientSideSpillBase.disabled = effectSaveInFlight;
+  fields.ambientSideSpillBoost.disabled = effectSaveInFlight;
+  fields.ambientSideSpillBaseValue.textContent = base.toFixed(2);
+  fields.ambientSideSpillBoostValue.textContent = boost.toFixed(2);
+}
+
+function bindAmbientSpillControls() {
+  if (!fields.ambientSideSpillBase || !fields.ambientSideSpillBoost) return;
+  fields.ambientSideSpillBase.addEventListener("input", () => {
+    const next = Number(fields.ambientSideSpillBase.value);
+    config.ambient_side_spill_base_intensity = next;
+    pendingAmbientSpillSettings.ambient_side_spill_base_intensity = next;
+    fields.ambientSideSpillBaseValue.textContent = next.toFixed(2);
+    scheduleEffectSave();
+  });
+  fields.ambientSideSpillBoost.addEventListener("input", () => {
+    const next = Number(fields.ambientSideSpillBoost.value);
+    config.ambient_side_spill_boost_intensity = next;
+    pendingAmbientSpillSettings.ambient_side_spill_boost_intensity = next;
+    fields.ambientSideSpillBoostValue.textContent = next.toFixed(2);
+    scheduleEffectSave();
+  });
+}
+
+function renderEffectPatterns() {
+  fields.effectPatterns.innerHTML = "";
+  for (const pattern of simulationPatterns) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "effect-pattern";
+    button.classList.toggle("active", loopingEffect === pattern.effect);
+    button.textContent = pattern.label || effectLabel(pattern.effect);
+    button.addEventListener("click", () => togglePreviewPattern(pattern.effect));
+    fields.effectPatterns.append(button);
+  }
+}
+
+async function togglePreviewPattern(effect) {
+  await triggerPreviewPattern(loopingEffect === effect ? "idle" : `loop:${effect}`);
+}
+
+async function triggerPreviewPattern(effect) {
+  if (!previewRunning) {
+    fields.previewStatus.textContent = "Start simulation before toggling test patterns";
+    return;
+  }
+  const response = await fetch("/api/preview/trigger", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ effect }),
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload.ok) {
+    fields.previewStatus.textContent = `Pattern failed: ${payload.error || "unknown error"}`;
+    return;
+  }
+  loopingEffect = payload.looping_effect || "";
+  renderEffectPatterns();
+  fields.previewStatus.textContent = loopingEffect ? `Looping pattern: ${effectLabel(loopingEffect)}` : "Pattern stopped";
+  schedulePreviewPoll(40);
+}
+
 function scheduleEffectSave() {
   if (effectSaveTimer) clearTimeout(effectSaveTimer);
   effectSaveTimer = setTimeout(saveEffectToggles, 120);
 }
 
 async function saveEffectToggles() {
+  if (effectSaveInFlight) {
+    effectSaveAgain = true;
+    return;
+  }
   effectSaveTimer = null;
+  effectSaveInFlight = true;
+  syncEffectToggleControls();
   const response = await fetch("/api/effects", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ enabled_effects: config.enabled_effects || {} }),
+    body: JSON.stringify({
+      enabled_effects: { ...(config.enabled_effects || {}), ...pendingEffectOverrides },
+      effect_sensitivity: { ...(config.effect_sensitivity || {}), ...pendingSensitivityOverrides },
+      ...pendingAmbientSpillSettings,
+    }),
   });
   const payload = await response.json();
+  effectSaveInFlight = false;
   if (!response.ok || !payload.ok) {
     statusEl.textContent = (payload.errors || ["Effect update failed"]).join("; ");
+    pendingEffectOverrides = {};
+    pendingSensitivityOverrides = {};
+    pendingAmbientSpillSettings = {};
     renderEffectToggles();
+    renderEffectSensitivity();
+    syncAmbientSpillControls();
     return;
   }
+  pendingEffectOverrides = {};
+  pendingSensitivityOverrides = {};
+  pendingAmbientSpillSettings = {};
   config.enabled_effects = payload.enabled_effects || config.enabled_effects;
-  renderEffectToggles();
+  config.effect_sensitivity = payload.effect_sensitivity || config.effect_sensitivity;
+  config.ambient_side_spill_base_intensity = payload.ambient_side_spill_base_intensity ?? config.ambient_side_spill_base_intensity;
+  config.ambient_side_spill_boost_intensity = payload.ambient_side_spill_boost_intensity ?? config.ambient_side_spill_boost_intensity;
+  syncEffectToggleControls();
+  syncAmbientSpillControls();
   statusEl.textContent = "Effects updated";
+  if (effectSaveAgain) {
+    effectSaveAgain = false;
+    scheduleEffectSave();
+  }
 }
 
 function renderEffectList(element, items, { counts = false } = {}) {
@@ -199,7 +390,21 @@ function renderEffectList(element, items, { counts = false } = {}) {
 
 function updateLiveEffects(payload) {
   if (payload.enabled_effects && config) {
-    config.enabled_effects = payload.enabled_effects;
+    config.enabled_effects = { ...payload.enabled_effects, ...pendingEffectOverrides };
+    syncEffectToggleControls();
+  }
+  if (payload.effect_sensitivity && config) {
+    config.effect_sensitivity = { ...payload.effect_sensitivity, ...pendingSensitivityOverrides };
+    syncEffectSensitivityControls();
+  }
+  if (config) {
+    if (payload.ambient_side_spill_base_intensity !== undefined) {
+      config.ambient_side_spill_base_intensity = pendingAmbientSpillSettings.ambient_side_spill_base_intensity ?? payload.ambient_side_spill_base_intensity;
+    }
+    if (payload.ambient_side_spill_boost_intensity !== undefined) {
+      config.ambient_side_spill_boost_intensity = pendingAmbientSpillSettings.ambient_side_spill_boost_intensity ?? payload.ambient_side_spill_boost_intensity;
+    }
+    syncAmbientSpillControls();
   }
   const triggered = Array.isArray(payload.triggered_effects)
     ? payload.triggered_effects.map((event) => ({
@@ -347,6 +552,8 @@ function bindStripEditor() {
   fields.stripDeviceStart.value = strip.device_start;
   fields.stripSyncMode.value = strip.sync_mode || "spatial";
   fields.stripTvRole.value = strip.tv_role || "none";
+  fields.stripTvFill.value = strip.tv_fill ?? 1.0;
+  fields.stripTvFillSpatial.checked = Boolean(strip.tv_fill_spatial);
   fields.stripExtends.value = strip.extends_strip_id || "";
   fields.stripExtensionMode.value = strip.extension_mode || "soft_spill";
   fields.stripExtensionStrength.value = strip.extension_strength ?? 0.45;
@@ -369,6 +576,8 @@ function stripEditorInputs() {
     fields.stripDeviceStart,
     fields.stripSyncMode,
     fields.stripTvRole,
+    fields.stripTvFill,
+    fields.stripTvFillSpatial,
     fields.stripExtends,
     fields.stripExtensionMode,
     fields.stripExtensionStrength,
@@ -388,6 +597,10 @@ function clearStripEditor() {
   fields.stripDeviceStart.value = "";
   fields.stripBlend.value = 0.5;
   fields.stripTvRole.value = "none";
+  fields.stripTvFill.value = 1.0;
+  fields.stripTvFillRow.hidden = true;
+  fields.stripTvFillSpatial.checked = false;
+  fields.stripTvFillSpatialRow.hidden = true;
   fields.stripExtends.value = "";
   fields.stripExtensionMode.value = "soft_spill";
   fields.stripExtensionStrength.value = 0.45;
@@ -396,6 +609,11 @@ function clearStripEditor() {
 
 function bindExtensionControls(strip) {
   const isExtension = Boolean(strip?.extends_strip_id);
+  const tvFillCapable = strip?.sync_mode === "tv_image" || strip?.sync_mode === "blend";
+  fields.stripTvFillRow.hidden = !tvFillCapable;
+  fields.stripTvFill.disabled = !strip || !tvFillCapable;
+  fields.stripTvFillSpatialRow.hidden = !tvFillCapable;
+  fields.stripTvFillSpatial.disabled = !strip || !tvFillCapable;
   fields.stripExtensionMode.disabled = !strip || !isExtension;
   fields.stripExtensionStrength.disabled = !strip || !isExtension || fields.stripExtensionMode.value === "effects_only";
   fields.stripExtensionSoftness.disabled = !strip || !isExtension || fields.stripExtensionMode.value === "effects_only";
@@ -466,6 +684,8 @@ function updateSelectedStripFromEditor() {
   strip.device_start = Math.max(0, Math.round(number(fields.stripDeviceStart.value, strip.device_start)));
   strip.sync_mode = fields.stripSyncMode.value;
   strip.tv_role = fields.stripTvRole.value || "none";
+  strip.tv_fill = Math.max(0, Math.min(1, number(fields.stripTvFill.value, strip.tv_fill ?? 1.0)));
+  strip.tv_fill_spatial = Boolean(fields.stripTvFillSpatial.checked);
   strip.extends_strip_id = fields.stripExtends.value || "";
   strip.extension_mode = fields.stripExtensionMode.value || "soft_spill";
   strip.extension_strength = Math.max(0, Math.min(1, number(fields.stripExtensionStrength.value, strip.extension_strength ?? 0.45)));
@@ -1056,7 +1276,13 @@ async function saveSpatialConfig({ silent = false } = {}) {
   const response = await fetch("/api/config", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ spatial }),
+    body: JSON.stringify({
+      spatial,
+      enabled_effects: { ...(config.enabled_effects || {}), ...pendingEffectOverrides },
+      effect_sensitivity: { ...(config.effect_sensitivity || {}), ...pendingSensitivityOverrides },
+      ambient_side_spill_base_intensity: pendingAmbientSpillSettings.ambient_side_spill_base_intensity ?? config.ambient_side_spill_base_intensity,
+      ambient_side_spill_boost_intensity: pendingAmbientSpillSettings.ambient_side_spill_boost_intensity ?? config.ambient_side_spill_boost_intensity,
+    }),
   });
   const payload = await response.json();
   saveInFlight = false;
@@ -1064,10 +1290,21 @@ async function saveSpatialConfig({ silent = false } = {}) {
     statusEl.textContent = (payload.errors || ["Save failed"]).join("; ");
     return;
   }
+  if (!effectSaveInFlight) {
+    if (effectSaveTimer) {
+      clearTimeout(effectSaveTimer);
+      effectSaveTimer = null;
+    }
+    pendingEffectOverrides = {};
+    pendingSensitivityOverrides = {};
+    pendingAmbientSpillSettings = {};
+  }
   config = payload.config;
   spatial = config.spatial;
   bindForm();
   renderEffectToggles();
+  renderEffectSensitivity();
+  syncAmbientSpillControls();
   await loadPreviewColors();
   syncLightPreview3d();
   requestDraw();
@@ -1103,18 +1340,34 @@ async function startPreview() {
   const response = await fetch("/api/preview/start", { method: "POST" });
   const payload = await response.json();
   previewRunning = Boolean(payload.running);
-  fields.previewStatus.textContent = previewRunning ? "Preview running" : `Preview failed: ${payload.error || "unknown error"}`;
+  fields.previewStatus.textContent = previewRunning ? `Preview running (${payload.mode || "config"})` : `Preview failed: ${payload.error || "unknown error"}`;
   if (previewRunning) schedulePreviewPoll(100);
 }
 
-async function stopPreview() {
-  await fetch("/api/preview/stop", { method: "POST" });
+async function startSimulation() {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  await saveSpatialConfig({ silent: true });
+  fields.previewStatus.textContent = "Starting simulation preview";
+  const response = await fetch("/api/preview/start-simulation", { method: "POST" });
+  const payload = await response.json();
+  previewRunning = Boolean(payload.running);
+  fields.previewStatus.textContent = previewRunning ? "Simulation preview running" : `Simulation failed: ${payload.error || "unknown error"}`;
+  if (previewRunning) schedulePreviewPoll(60);
+}
+
+async function stopPreview(path = "/api/preview/stop") {
+  await fetch(path, { method: "POST" });
   previewRunning = false;
   if (previewTimer) {
     clearTimeout(previewTimer);
     previewTimer = null;
   }
   fields.previewStatus.textContent = "Preview stopped";
+  loopingEffect = "";
+  renderEffectPatterns();
   renderEffectList(fields.triggeredEffects, []);
   renderEffectList(fields.activeEffects, []);
   previewImage = null;
@@ -1124,6 +1377,10 @@ async function stopPreview() {
   await loadPreviewColors();
   syncLightPreview3d();
   requestDraw();
+}
+
+async function stopSimulation() {
+  await stopPreview("/api/preview/stop-simulation");
 }
 
 function schedulePreviewPoll(delay = 160) {
@@ -1168,6 +1425,8 @@ async function pollPreviewStatus() {
     const response = await fetch("/api/preview/status");
     const payload = await response.json();
     previewRunning = Boolean(payload.running);
+    loopingEffect = payload.looping_effect || "";
+    renderEffectPatterns();
     updateLiveEffects(payload);
     if (
       Array.isArray(payload.leds_flat)
@@ -1185,11 +1444,12 @@ async function pollPreviewStatus() {
     }
     fetchPreviewFrame(Number(payload.frame_revision || 0));
     const waitingForFrames = Number(payload.frame_revision || 0) === 0;
+    const mode = payload.preview_mode === "simulation" ? "Simulation" : "Live";
     const source = waitingForFrames
       ? "Waiting for frames"
       : (payload.hyperhdr_connected ? "HyperHDR connected" : "HyperHDR reconnecting");
     fields.previewStatus.textContent = previewRunning
-      ? `Preview running | ${source} | FPS ${Number(payload.fps || 0).toFixed(1)} | LED rev ${Number(payload.led_revision || 0)} | Frame rev ${Number(payload.frame_revision || 0)} | Lit ${Number(payload.lit_led_count || 0)}/${Number(payload.led_count || 0)} | Max LED ${Number(payload.led_max || 0)} | Waves ${payload.active_waves || 0}`
+      ? `${mode} preview running | ${source} | FPS ${Number(payload.fps || 0).toFixed(1)} | LED rev ${Number(payload.led_revision || 0)} | Frame rev ${Number(payload.frame_revision || 0)} | Lit ${Number(payload.lit_led_count || 0)}/${Number(payload.led_count || 0)} | Max LED ${Number(payload.led_max || 0)} | Waves ${payload.active_waves || 0}`
       : "Preview stopped";
   } catch (error) {
     fields.previewStatus.textContent = `Preview error: ${error}`;
@@ -1217,6 +1477,8 @@ function addStrip() {
     device_start: 0,
     sync_mode: "spatial",
     blend: 0.5,
+    tv_fill: 1.0,
+    tv_fill_spatial: false,
     tv_role: "none",
     extends_strip_id: "",
     extension_mode: "soft_spill",
@@ -1282,7 +1544,11 @@ fields.deleteStrip.addEventListener("click", deleteSelectedStrip);
 fields.addStrip.addEventListener("click", addStrip);
 fields.save.addEventListener("click", saveConfig);
 fields.startPreview.addEventListener("click", startPreview);
-fields.stopPreview.addEventListener("click", stopPreview);
+fields.stopPreview.addEventListener("click", () => stopPreview());
+fields.startSimulation.addEventListener("click", startSimulation);
+fields.stopSimulation.addEventListener("click", stopSimulation);
+fields.stopPattern.addEventListener("click", () => triggerPreviewPattern("idle"));
+bindAmbientSpillControls();
 fields.view2d.addEventListener("click", () => setViewMode("2d"));
 fields.view3d.addEventListener("click", () => setViewMode("3d"));
 window.addEventListener("resize", () => {

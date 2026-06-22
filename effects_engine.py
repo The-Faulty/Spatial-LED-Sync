@@ -212,6 +212,10 @@ class HeadlessEffectsEngine:
                     ):
                         colors, intensity = self.processor.top_strip_colors(frame, self.wave_engine.front_ambient_led_count())
                         self.wave_engine.set_front_ambient_strip(colors, intensity)
+                        self.wave_engine.set_ambient_spill_scene_boost(
+                            analysis.ambient_spill_boost_score,
+                            analysis.luminous_bloom_color,
+                        )
                 else:
                     analysis = None
 

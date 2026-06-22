@@ -30,6 +30,27 @@ DEFAULT_ENABLED_EFFECTS = {
     "negative_wave": True,
 }
 
+TRIGGER_EFFECTS = {
+    "spill",
+    "top_color_exit",
+    "flash",
+    "explosion",
+    "camera_pan",
+    "energy_trail",
+    "shockwave",
+    "directional_sweep",
+    "lightning",
+    "impact_pulse",
+    "color_bloom",
+    "flame_shimmer",
+    "underwater",
+    "portal_vortex",
+    "scene_wipe",
+    "negative_wave",
+}
+
+DEFAULT_EFFECT_SENSITIVITY = {name: 0.5 for name in TRIGGER_EFFECTS}
+
 
 @dataclass
 class WallConfig:
@@ -81,10 +102,14 @@ class EngineConfig:
     side_major_threshold: float = 0.70
     front_ambient_min_brightness: float = 0.04
     front_ambient_intensity: float = 0.35
+    front_ambient_coverage: float = 1.0
     front_ambient_source: str = "top_strip"
     front_ambient_top_height: float = 0.12
     front_ambient_blur: int = 5
+    ambient_side_spill_base_intensity: float = 0.45
+    ambient_side_spill_boost_intensity: float = 1.0
     enabled_effects: dict[str, bool] = field(default_factory=lambda: dict(DEFAULT_ENABLED_EFFECTS))
+    effect_sensitivity: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_EFFECT_SENSITIVITY))
 
     wave_speed: float = 1.0
     wave_decay: float = 0.95
@@ -150,6 +175,15 @@ class EngineConfig:
         if isinstance(data.get("enabled_effects"), dict):
             enabled_effects.update({k: bool(v) for k, v in data["enabled_effects"].items() if k in DEFAULT_ENABLED_EFFECTS})
         data["enabled_effects"] = enabled_effects
+        effect_sensitivity = dict(DEFAULT_EFFECT_SENSITIVITY)
+        if isinstance(data.get("effect_sensitivity"), dict):
+            for key, value in data["effect_sensitivity"].items():
+                if key in TRIGGER_EFFECTS:
+                    try:
+                        effect_sensitivity[key] = float(value)
+                    except (TypeError, ValueError):
+                        effect_sensitivity[key] = value
+        data["effect_sensitivity"] = effect_sensitivity
         known = {f.name for f in cls.__dataclass_fields__.values()}
         return cls(**{k: v for k, v in data.items() if k in known})
 
@@ -211,10 +245,12 @@ class EngineConfig:
             value = getattr(self, name)
             if not 0.0 <= value <= 1.0:
                 errors.append(f"{name} must be between 0.0 and 1.0")
-        for name in ("side_major_threshold", "front_ambient_min_brightness", "front_ambient_intensity"):
+        for name in ("side_major_threshold", "front_ambient_min_brightness", "front_ambient_intensity", "front_ambient_coverage", "ambient_side_spill_base_intensity"):
             value = getattr(self, name)
             if not 0.0 <= value <= 1.0:
                 errors.append(f"{name} must be between 0.0 and 1.0")
+        if not 0.0 <= self.ambient_side_spill_boost_intensity <= 2.0:
+            errors.append("ambient_side_spill_boost_intensity must be between 0.0 and 2.0")
         if self.front_ambient_source not in {"top_strip", "average"}:
             errors.append("front_ambient_source must be top_strip or average")
         if not 0.02 <= self.front_ambient_top_height <= 0.50:
@@ -231,6 +267,18 @@ class EngineConfig:
                     errors.append(f"enabled_effects.{name} is required")
                 elif not isinstance(self.enabled_effects[name], bool):
                     errors.append(f"enabled_effects.{name} must be true or false")
+        if not isinstance(self.effect_sensitivity, dict):
+            errors.append("effect_sensitivity must be an object")
+        else:
+            for name in TRIGGER_EFFECTS:
+                if name not in self.effect_sensitivity:
+                    errors.append(f"effect_sensitivity.{name} is required")
+                    continue
+                value = self.effect_sensitivity[name]
+                if not isinstance(value, (int, float)):
+                    errors.append(f"effect_sensitivity.{name} must be a number")
+                elif not 0.0 <= float(value) <= 1.0:
+                    errors.append(f"effect_sensitivity.{name} must be between 0.0 and 1.0")
         if self.level1_threshold > self.level2_threshold:
             errors.append("level1_threshold must be less than or equal to level2_threshold")
         if self.motion_algorithm not in {"optical_flow", "frame_difference"}:

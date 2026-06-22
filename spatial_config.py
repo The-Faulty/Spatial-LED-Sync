@@ -53,6 +53,8 @@ class SpatialStrip:
     device_start: int = 0
     sync_mode: str = "spatial"
     blend: float = 0.5
+    tv_fill: float = 1.0
+    tv_fill_spatial: bool = False
     tv_role: str = "none"
     extends_strip_id: str = ""
     extension_mode: str = "soft_spill"
@@ -120,6 +122,8 @@ def _default_strip(
         "device_start": device_start,
         "sync_mode": "spatial",
         "blend": 0.5,
+        "tv_fill": 1.0,
+        "tv_fill_spatial": False,
         "tv_role": "none",
         "extends_strip_id": "",
         "extension_mode": "soft_spill",
@@ -237,6 +241,8 @@ def validate_spatial_config(raw: dict[str, Any] | None, total_leds: int = 240) -
                 errors.append(f"spatial.strips.{strip.id}.{attr} must be inside the room height")
         if not 0.0 <= strip.blend <= 1.0:
             errors.append(f"spatial.strips.{strip.id}.blend must be between 0.0 and 1.0")
+        if not 0.0 <= strip.tv_fill <= 1.0:
+            errors.append(f"spatial.strips.{strip.id}.tv_fill must be between 0.0 and 1.0")
         if not 0.0 <= strip.extension_strength <= 1.0:
             errors.append(f"spatial.strips.{strip.id}.extension_strength must be between 0.0 and 1.0")
         if not 0.0 <= strip.extension_softness <= 1.0:

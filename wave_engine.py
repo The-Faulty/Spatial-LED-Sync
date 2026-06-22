@@ -40,6 +40,8 @@ class WaveEngine:
         self.front_ambient_color = np.zeros(3, dtype=np.float32)
         self.front_ambient_strip_colors: np.ndarray | None = None
         self.front_ambient_intensity = 0.0
+        self.ambient_spill_scene_boost = 0.0
+        self.ambient_spill_scene_color = np.zeros(3, dtype=np.float32)
         self._front_ambient_led_cache: list[int] | None = None
         self._front_ambient_led_set_cache: set[int] | None = None
 
@@ -125,6 +127,16 @@ class WaveEngine:
             self.front_ambient_strip_colors = self.front_ambient_strip_colors * 0.70 + target * 0.30
         self.front_ambient_color = np.mean(self.front_ambient_strip_colors, axis=0)
         self.front_ambient_intensity = max(self.front_ambient_intensity * 0.80, float(np.clip(intensity, 0.0, 1.0)))
+
+    def set_ambient_spill_scene_boost(self, score: float, color: tuple[int, int, int]) -> None:
+        score = float(np.clip(score, 0.0, 1.0))
+        self.ambient_spill_scene_boost = max(self.ambient_spill_scene_boost * 0.88, score)
+        if score > 0.0:
+            target = np.array(color, dtype=np.float32) / 255.0
+            if float(np.max(self.ambient_spill_scene_color)) <= 0.001:
+                self.ambient_spill_scene_color = target
+            else:
+                self.ambient_spill_scene_color = self.ambient_spill_scene_color * 0.65 + target * 0.35
 
     def front_ambient_led_count(self) -> int:
         return len(self._front_ambient_leds())
@@ -222,6 +234,13 @@ class WaveEngine:
         if not front_leds:
             self._front_ambient_led_cache = []
             return self._front_ambient_led_cache
+        coverage = float(np.clip(self.config.front_ambient_coverage, 0.0, 1.0))
+        if coverage <= 0.0:
+            self._front_ambient_led_cache = []
+            return self._front_ambient_led_cache
+        if coverage >= 0.999:
+            self._front_ambient_led_cache = front_leds
+            return self._front_ambient_led_cache
         try:
             left_idx = front_leds.index(self.config.tv_left_boundary)
             right_idx = front_leds.index(self.config.tv_right_boundary)
@@ -238,7 +257,14 @@ class WaveEngine:
         if self.config.tv_center_led in backward and self.config.tv_center_led not in forward:
             self._front_ambient_led_cache = backward
             return self._front_ambient_led_cache
-        self._front_ambient_led_cache = forward if len(forward) <= len(backward) else backward
+        tv_path = forward if len(forward) <= len(backward) else backward
+        target_count = max(1, int(round(len(front_leds) * coverage)))
+        if target_count <= len(tv_path):
+            self._front_ambient_led_cache = tv_path
+            return self._front_ambient_led_cache
+        center_idx = front_leds.index(self.config.tv_center_led)
+        half = target_count // 2
+        self._front_ambient_led_cache = [front_leds[(center_idx - half + offset) % len(front_leds)] for offset in range(target_count)]
         return self._front_ambient_led_cache
 
     @staticmethod
@@ -262,12 +288,18 @@ class WaveEngine:
             bidirectional = wave.kind in {"flash", "explosion", "impact_pulse", "shockwave", "color_bloom", "underwater", "portal_vortex", "negative_wave"}
             dist = min(dist, reverse_dist if bidirectional else dist)
             spread_scale = 4.5 if wave.kind in {"color_bloom", "underwater"} else 2.8
-            if dist > wave.spread_rate * spread_scale:
+            if dist > wave.spread_rate * spread_scale and wave.kind not in {"shockwave", "impact_pulse", "lightning"}:
                 continue
             if wave.kind == "shockwave":
                 center = travelled
                 ring_width = max(1.0, wave.spread_rate * 0.45)
-                envelope = np.exp(-((dist - center) ** 2) / (2.0 * ring_width**2))
+                ring = np.exp(-((dist - center) ** 2) / (2.0 * ring_width**2))
+                room_flash = max(0.0, 1.0 - travelled / max(1.0, wave.radius_limit)) * 0.32
+                envelope = max(ring, room_flash)
+            elif wave.kind == "impact_pulse":
+                room_dist = dist / max(1.0, self.config.total_leds / 2)
+                collapse = max(0.0, 1.0 - wave.age / max(0.2, wave.width))
+                envelope = max(np.exp(-(room_dist**2) / 0.9), 0.45 * collapse)
             elif wave.kind in {"flame_shimmer", "underwater", "portal_vortex"}:
                 shimmer = 0.55 + 0.45 * np.sin(led * 0.37 + wave.age * (14.0 if wave.kind == "flame_shimmer" else 4.0) + wave.phase * 6.28) ** 2
                 envelope = np.exp(-(dist ** 2) / (2.0 * max(1.0, wave.spread_rate * spread_scale / 2.0) ** 2)) * shimmer
@@ -275,6 +307,10 @@ class WaveEngine:
                 head = np.exp(-(dist ** 2) / (2.0 * max(1.0, wave.spread_rate) ** 2))
                 tail = np.exp(-((dist - wave.spread_rate * 3.0) ** 2) / (2.0 * max(1.0, wave.spread_rate * 2.2) ** 2)) * 0.45
                 envelope = max(head, tail)
+            elif wave.kind == "lightning" and wave.intensity >= 0.72:
+                local = np.exp(-(dist ** 2) / (2.0 * max(1.0, wave.spread_rate) ** 2))
+                strobe = 1.0 if int(wave.age * 28.0 + wave.phase * 7.0) % 2 == 0 else 0.0
+                envelope = max(local, strobe * wave.intensity * 0.55)
             else:
                 envelope = np.exp(-(dist ** 2) / (2.0 * max(1.0, wave.spread_rate) ** 2))
             travel_fade = max(0.0, 1.0 - travelled / max(1.0, wave.radius_limit))

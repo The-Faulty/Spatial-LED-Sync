@@ -28,19 +28,48 @@
           <div class="actions">
             <button id="start-preview" type="button">Start Preview</button>
             <button id="stop-preview" type="button">Stop Preview</button>
+            <button id="start-simulation" type="button">Start Simulation</button>
+            <button id="stop-simulation" type="button">Stop Simulation</button>
           </div>
           <div id="preview-status" class="status-line">Preview stopped</div>
         </fieldset>
 
         <fieldset>
           <legend>Effects</legend>
-          <div id="effect-toggles" class="effect-grid"></div>
-          <div class="effect-live">
-            <div class="effect-live-title">Triggering now</div>
+          <details class="effect-panel" open>
+            <summary>Effect toggles</summary>
+            <div id="effect-toggles" class="effect-grid"></div>
+          </details>
+          <details class="effect-panel" open>
+            <summary>Trigger sensitivity</summary>
+            <div id="effect-sensitivity" class="effect-sensitivity"></div>
+          </details>
+          <details class="effect-panel" open>
+            <summary>Ambient spill</summary>
+            <div class="effect-sensitivity">
+              <label class="effect-sensitivity-row">
+                <span>Base intensity</span>
+                <input id="ambient-side-spill-base-intensity" type="range" min="0" max="1" step="0.05" />
+                <span id="ambient-side-spill-base-value" class="effect-sensitivity-value">0.45</span>
+              </label>
+              <label class="effect-sensitivity-row">
+                <span>Boost intensity</span>
+                <input id="ambient-side-spill-boost-intensity" type="range" min="0" max="2" step="0.05" />
+                <span id="ambient-side-spill-boost-value" class="effect-sensitivity-value">1.00</span>
+              </label>
+            </div>
+          </details>
+          <details class="effect-panel">
+            <summary>Test patterns</summary>
+            <div id="effect-patterns" class="effect-grid"></div>
+            <button id="stop-pattern" type="button" class="effect-stop">Stop Pattern</button>
+          </details>
+          <details class="effect-panel" open>
+            <summary>Triggering now</summary>
             <div id="triggered-effects" class="effect-list empty">None</div>
             <div class="effect-live-title">Active render waves</div>
             <div id="active-effects" class="effect-list empty">None</div>
-          </div>
+          </details>
         </fieldset>
 
         <fieldset>
@@ -116,6 +145,8 @@
               <option value="right">right</option>
             </select>
           </label>
+          <label id="strip-tv-fill-row">TV Fill <input id="strip-tv-fill" type="range" min="0" max="1" step="0.05" /></label>
+          <label id="strip-tv-fill-spatial-row">Spatial-aware TV fill <input id="strip-tv-fill-spatial" type="checkbox" /></label>
           <label>Extension Of
             <select id="strip-extends"></select>
           </label>

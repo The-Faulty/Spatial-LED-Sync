@@ -16,6 +16,30 @@ import websocket
 from config import EngineConfig
 
 
+SIMULATION_EFFECT_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("front_ambient", "Front ambient"),
+    ("ambient_side_spill", "Ambient side spill"),
+    ("ambient_side_spill_boost", "Ambient spill boost"),
+    ("spill", "Motion spill"),
+    ("top_color_exit", "Top color exit"),
+    ("flash", "Flash"),
+    ("explosion", "Explosion"),
+    ("camera_pan", "Camera pan"),
+    ("energy_trail", "Energy trail"),
+    ("shockwave", "Shockwave"),
+    ("directional_sweep", "Directional sweep"),
+    ("lightning", "Lightning"),
+    ("impact_pulse", "Impact pulse"),
+    ("color_bloom", "Color bloom"),
+    ("flame_shimmer", "Flame shimmer"),
+    ("underwater", "Underwater"),
+    ("portal_vortex", "Portal vortex"),
+    ("scene_wipe", "Scene wipe"),
+    ("ember_particles", "Ember particles"),
+    ("negative_wave", "Negative wave"),
+)
+
+
 class HyperHDRClient:
     """Receives full image frames from HyperHDR or produces a simulation stream.
 
@@ -260,12 +284,24 @@ class HyperHDRClient:
         self.logger.info("Running simulated HyperHDR frame stream")
         width, height = 640, 360
         active_effect: str | None = None
+        looping_effect: str | None = None
         effect_started = 0.0
         effect_duration = 1.6
         frame_interval = 1.0 / max(1, self.config.target_fps)
         while not self.stop_event.is_set():
             try:
-                active_effect = self.simulation_commands.get_nowait()
+                command = self.simulation_commands.get_nowait()
+                if command == "idle":
+                    active_effect = None
+                    looping_effect = None
+                    self.logger.info("Stopped simulation effect loop")
+                    continue
+                if command.startswith("loop:"):
+                    active_effect = command.split(":", 1)[1]
+                    looping_effect = active_effect
+                else:
+                    active_effect = command
+                    looping_effect = None
                 effect_started = time.monotonic()
                 effect_duration = self._simulation_duration(active_effect)
                 self.logger.info("Triggered simulation effect: %s", active_effect)
@@ -276,8 +312,12 @@ class HyperHDRClient:
             if active_effect:
                 progress = (time.monotonic() - effect_started) / effect_duration
                 if progress >= 1.0:
-                    active_effect = None
-                    progress = 0.0
+                    if looping_effect:
+                        progress %= 1.0
+                        effect_started = time.monotonic() - progress * effect_duration
+                    else:
+                        active_effect = None
+                        progress = 0.0
 
             frame = self._simulation_frame(width, height, active_effect, progress)
             self._put_frame(frame)
@@ -286,9 +326,15 @@ class HyperHDRClient:
     @staticmethod
     def _simulation_duration(effect: str) -> float:
         return {
+            "front_ambient": 2.0,
+            "ambient_side_spill": 2.0,
+            "ambient_side_spill_boost": 2.4,
+            "spill": 1.4,
+            "top_color_exit": 1.2,
             "flash": 0.65,
             "explosion": 1.3,
             "shockwave": 1.5,
+            "camera_pan": 1.8,
             "pan_left": 1.8,
             "pan_right": 1.8,
             "left_exit": 1.4,
@@ -314,11 +360,36 @@ class HyperHDRClient:
         frame[:] = (6, 5, 4)
         cv2.rectangle(frame, (0, 0), (width - 1, height - 1), (10, 8, 7), 3)
         if effect is None:
-            cv2.putText(frame, "Simulation idle - use GUI trigger buttons", (34, height // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (90, 90, 90), 2, cv2.LINE_AA)
-            return frame
+            cv2.putText(frame, "Simulation idle - use test pattern buttons", (34, height // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (90, 90, 90), 2, cv2.LINE_AA)
+            return cv2.flip(frame, 1)
 
         p = float(np.clip(progress, 0.0, 1.0))
-        if effect == "flash":
+        if effect == "front_ambient":
+            frame[:] = (8, 8, 10)
+            top_h = max(18, height // 7)
+            for x in range(width):
+                mix = x / max(1, width - 1)
+                color = (int(220 * (1.0 - mix)), int(70 + 120 * mix), int(80 + 140 * mix))
+                cv2.line(frame, (x, 0), (x, top_h), color, 1)
+            cv2.GaussianBlur(frame, (0, 0), 8, dst=frame)
+        elif effect == "ambient_side_spill":
+            frame[:] = (5, 5, 7)
+            top_h = max(18, height // 8)
+            frame[:top_h, : width // 2] = (20, 80, 255)
+            frame[:top_h, width // 2 :] = (255, 90, 25)
+            cv2.rectangle(frame, (0, 0), (width - 1, top_h), (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(frame, "edge color spill", (30, top_h + 38), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (160, 160, 180), 2, cv2.LINE_AA)
+        elif effect == "ambient_side_spill_boost":
+            ramp = 0.18 + 0.82 * np.sin(p * np.pi / 2.0) ** 1.7
+            pulse = 0.85 + 0.15 * np.sin(p * np.pi * 4.0)
+            level = float(np.clip(ramp * pulse, 0.0, 1.0))
+            color = np.array([22, 105, 255], dtype=np.float32) * level
+            frame[:] = np.clip(color, 0, 255).astype(np.uint8)
+            top_h = max(20, height // 6)
+            frame[:top_h, :] = np.clip(color * 1.12, 0, 255).astype(np.uint8)
+            cv2.rectangle(frame, (0, 0), (width - 1, top_h), (255, 230, 180), 2, cv2.LINE_AA)
+            cv2.putText(frame, "solid color intensity ramp", (30, top_h + 38), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (220, 210, 190), 2, cv2.LINE_AA)
+        elif effect == "flash":
             level = int(235 * max(0.0, 1.0 - p) + 16)
             frame[:] = (level, level, min(255, level + 15))
         elif effect == "explosion":
@@ -329,7 +400,7 @@ class HyperHDRClient:
             radius = int(20 + p * max(width, height) * 0.65)
             cv2.circle(frame, (width // 2, height // 2), radius, (245, 245, 255), 16, cv2.LINE_AA)
             cv2.circle(frame, (width // 2, height // 2), max(1, radius - 28), (80, 80, 180), 6, cv2.LINE_AA)
-        elif effect == "left_exit":
+        elif effect in {"spill", "left_exit"}:
             x = int(width * (0.55 - p * 0.75))
             self._draw_moving_orb(frame, x, height // 2, (255, 80, 40), trail_direction=1, progress=p)
         elif effect == "right_exit":
@@ -342,14 +413,14 @@ class HyperHDRClient:
             x = int(width * (0.72 - p * 0.92))
             y = max(20, height // 10)
             self._draw_moving_orb(frame, x, y, (255, 60, 180), trail_direction=1, progress=p)
-        elif effect == "top_color_exit_right":
+        elif effect in {"top_color_exit", "top_color_exit_right"}:
             x = int(width * (0.28 + p * 0.92))
             y = max(20, height // 10)
             self._draw_moving_orb(frame, x, y, (40, 210, 255), trail_direction=-1, progress=p)
         elif effect == "pan_left":
             shift = int(p * width)
             self._draw_pan_bands(frame, -shift)
-        elif effect == "pan_right":
+        elif effect in {"camera_pan", "pan_right"}:
             shift = int(p * width)
             self._draw_pan_bands(frame, shift)
         elif effect == "energy_trail":
@@ -412,7 +483,7 @@ class HyperHDRClient:
             level = int(150 * max(0.0, 1.0 - p))
             frame[:] = (level, level, level)
             cv2.rectangle(frame, (0, 0), (int(width * p), height), (0, 0, 0), -1)
-        return frame
+        return cv2.flip(frame, 1)
 
     @staticmethod
     def _draw_moving_orb(frame: np.ndarray, x: int, y: int, color: tuple[int, int, int], trail_direction: int, progress: float) -> None:
