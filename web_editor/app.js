@@ -31,6 +31,29 @@ let previewFrameLoading = false;
 let previewImage = null;
 let emptyDragStart = null;
 let activeView = "2d";
+let effectSaveTimer = null;
+
+const EFFECT_LABELS = {
+  front_ambient: "Front ambient",
+  ambient_side_spill: "Ambient side spill",
+  spill: "Motion spill",
+  top_color_exit: "Top color exit",
+  flash: "Flash",
+  explosion: "Explosion",
+  camera_pan: "Camera pan",
+  energy_trail: "Energy trail",
+  shockwave: "Shockwave",
+  directional_sweep: "Directional sweep",
+  lightning: "Lightning",
+  impact_pulse: "Impact pulse",
+  color_bloom: "Color bloom",
+  flame_shimmer: "Flame shimmer",
+  underwater: "Underwater",
+  portal_vortex: "Portal vortex",
+  scene_wipe: "Scene wipe",
+  ember_particles: "Ember particles",
+  negative_wave: "Negative wave",
+};
 
 const fields = {
   roomWidth: document.querySelector("#room-width"),
@@ -44,6 +67,9 @@ const fields = {
   startPreview: document.querySelector("#start-preview"),
   stopPreview: document.querySelector("#stop-preview"),
   previewStatus: document.querySelector("#preview-status"),
+  effectToggles: document.querySelector("#effect-toggles"),
+  triggeredEffects: document.querySelector("#triggered-effects"),
+  activeEffects: document.querySelector("#active-effects"),
   view2d: document.querySelector("#view-2d"),
   view3d: document.querySelector("#view-3d"),
   devicesJson: document.querySelector("#devices-json"),
@@ -86,6 +112,7 @@ async function loadConfig() {
   config = payload.config;
   spatial = payload.spatial;
   bindForm();
+  renderEffectToggles();
   await loadPreviewColors();
   syncLightPreview3d();
   renderSpatial();
@@ -101,6 +128,93 @@ async function loadPreviewColors() {
 
 function syncLightPreview3d() {
   lightPreview3d.setState({ spatial, previewColors, previewImage });
+}
+
+function effectLabel(effect) {
+  return EFFECT_LABELS[effect] || effect.replaceAll("_", " ");
+}
+
+function renderEffectToggles() {
+  fields.effectToggles.innerHTML = "";
+  const enabled = config?.enabled_effects || {};
+  for (const effect of Object.keys(enabled)) {
+    const label = document.createElement("label");
+    label.className = "effect-toggle";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = Boolean(enabled[effect]);
+    checkbox.dataset.effect = effect;
+    checkbox.addEventListener("change", () => {
+      config.enabled_effects[effect] = checkbox.checked;
+      scheduleEffectSave();
+    });
+    const text = document.createElement("span");
+    text.textContent = effectLabel(effect);
+    label.append(checkbox, text);
+    fields.effectToggles.append(label);
+  }
+}
+
+function scheduleEffectSave() {
+  if (effectSaveTimer) clearTimeout(effectSaveTimer);
+  effectSaveTimer = setTimeout(saveEffectToggles, 120);
+}
+
+async function saveEffectToggles() {
+  effectSaveTimer = null;
+  const response = await fetch("/api/effects", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled_effects: config.enabled_effects || {} }),
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload.ok) {
+    statusEl.textContent = (payload.errors || ["Effect update failed"]).join("; ");
+    renderEffectToggles();
+    return;
+  }
+  config.enabled_effects = payload.enabled_effects || config.enabled_effects;
+  renderEffectToggles();
+  statusEl.textContent = "Effects updated";
+}
+
+function renderEffectList(element, items, { counts = false } = {}) {
+  element.innerHTML = "";
+  if (!items.length) {
+    element.textContent = "None";
+    element.classList.add("empty");
+    return;
+  }
+  element.classList.remove("empty");
+  for (const item of items) {
+    const pill = document.createElement("span");
+    pill.className = "effect-pill";
+    if (item.primary) pill.classList.add("primary");
+    pill.textContent = counts
+      ? `${effectLabel(item.effect)} x${item.count}`
+      : `${item.primary ? "Primary: " : ""}${effectLabel(item.effect)} ${item.edge ? `(${item.edge})` : ""}`;
+    element.append(pill);
+  }
+}
+
+function updateLiveEffects(payload) {
+  if (payload.enabled_effects && config) {
+    config.enabled_effects = payload.enabled_effects;
+  }
+  const triggered = Array.isArray(payload.triggered_effects)
+    ? payload.triggered_effects.map((event) => ({
+        effect: event.effect_id || event.kind,
+        edge: event.edge,
+        primary: Boolean(event.primary),
+      }))
+    : [];
+  const activeCounts = payload.active_effect_counts || {};
+  const active = Object.entries(activeCounts)
+    .filter(([, count]) => Number(count) > 0)
+    .map(([effect, count]) => ({ effect, count: Number(count) }))
+    .sort((a, b) => b.count - a.count || effectLabel(a.effect).localeCompare(effectLabel(b.effect)));
+  renderEffectList(fields.triggeredEffects, triggered);
+  renderEffectList(fields.activeEffects, active, { counts: true });
 }
 
 function setViewMode(mode) {
@@ -953,6 +1067,7 @@ async function saveSpatialConfig({ silent = false } = {}) {
   config = payload.config;
   spatial = config.spatial;
   bindForm();
+  renderEffectToggles();
   await loadPreviewColors();
   syncLightPreview3d();
   requestDraw();
@@ -1000,6 +1115,8 @@ async function stopPreview() {
     previewTimer = null;
   }
   fields.previewStatus.textContent = "Preview stopped";
+  renderEffectList(fields.triggeredEffects, []);
+  renderEffectList(fields.activeEffects, []);
   previewImage = null;
   previewFrameRevision = 0;
   previewFrameRequestRevision = 0;
@@ -1051,6 +1168,7 @@ async function pollPreviewStatus() {
     const response = await fetch("/api/preview/status");
     const payload = await response.json();
     previewRunning = Boolean(payload.running);
+    updateLiveEffects(payload);
     if (
       Array.isArray(payload.leds_flat)
       && payload.leds_flat.length

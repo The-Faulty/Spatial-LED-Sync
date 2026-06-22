@@ -174,6 +174,66 @@ button.danger {
   gap: 8px;
 }
 
+.effect-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 10px;
+}
+
+.effect-toggle {
+  display: grid;
+  grid-template-columns: 16px 1fr;
+  gap: 7px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.effect-toggle input {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+}
+
+.effect-live {
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid #303946;
+}
+
+.effect-live-title {
+  margin: 7px 0 5px;
+  color: #9fb1c1;
+  font-size: 12px;
+}
+
+.effect-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 24px;
+}
+
+.effect-list.empty {
+  color: #708393;
+  font-size: 12px;
+}
+
+.effect-pill {
+  max-width: 100%;
+  padding: 3px 7px;
+  border: 1px solid #3b4654;
+  border-radius: 5px;
+  color: #dce8f2;
+  background: #10141a;
+  font-size: 12px;
+}
+
+.effect-pill.primary {
+  border-color: #66b5ff;
+  color: #ffffff;
+  background: #245f99;
+}
+
 .nudge-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);

@@ -297,6 +297,16 @@ class HyperHDRClient:
             "top_color_exit_left": 1.2,
             "top_color_exit_right": 1.2,
             "energy_trail": 1.6,
+            "directional_sweep": 1.4,
+            "lightning": 0.8,
+            "impact_pulse": 0.9,
+            "color_bloom": 2.2,
+            "flame_shimmer": 1.6,
+            "underwater": 2.4,
+            "portal_vortex": 1.8,
+            "scene_wipe": 1.2,
+            "ember_particles": 1.4,
+            "negative_wave": 1.0,
         }.get(effect, 1.2)
 
     def _simulation_frame(self, width: int, height: int, effect: str | None, progress: float) -> np.ndarray:
@@ -348,6 +358,60 @@ class HyperHDRClient:
             for i in range(8):
                 fade = 1.0 - i / 8
                 cv2.circle(frame, (x - i * 34, y), int(30 * fade), (int(240 * fade), int(80 * fade), 255), -1, cv2.LINE_AA)
+        elif effect == "directional_sweep":
+            shift = int(p * width * 1.2)
+            self._draw_pan_bands(frame, shift)
+            cv2.rectangle(frame, (shift - 90, 0), (shift + 120, height), (220, 120, 40), -1)
+        elif effect == "lightning":
+            frame[:] = (12, 10, 16)
+            for i in range(5):
+                x = int(width * (0.15 + i * 0.18 + 0.04 * np.sin(p * 20 + i)))
+                cv2.line(frame, (x, 0), (x + int(80 * np.sin(i + p * 8)), height), (255, 245, 230), 8, cv2.LINE_AA)
+            if int(p * 16) % 2 == 0:
+                frame[:] = np.maximum(frame, 190)
+        elif effect == "impact_pulse":
+            level = int(35 + 190 * np.exp(-p * 5.0))
+            frame[:] = (level, min(255, level + 20), min(255, level + 35))
+            cv2.circle(frame, (width // 2, height // 2), int(80 + p * 260), (40, 180, 255), 18, cv2.LINE_AA)
+        elif effect == "color_bloom":
+            hue = int(120 + 80 * np.sin(p * np.pi))
+            frame[:] = (hue, 30, 190)
+            cv2.GaussianBlur(frame, (0, 0), 12, dst=frame)
+        elif effect == "flame_shimmer":
+            frame[:] = (8, 12, 28)
+            for i in range(18):
+                x = int((i / 18) * width)
+                y = int(height * (0.65 + 0.18 * np.sin(p * 18 + i)))
+                cv2.circle(frame, (x, y), 70, (20, 90 + i * 5 % 120, 255), -1, cv2.LINE_AA)
+            cv2.GaussianBlur(frame, (0, 0), 8, dst=frame)
+        elif effect == "underwater":
+            frame[:] = (120, 60, 8)
+            for i in range(9):
+                y = int(height * (i / 9) + np.sin(p * 8 + i) * 18)
+                cv2.line(frame, (0, y), (width, y + int(np.sin(p * 6 + i) * 60)), (210, 170, 40), 5, cv2.LINE_AA)
+            cv2.GaussianBlur(frame, (0, 0), 5, dst=frame)
+        elif effect == "portal_vortex":
+            center = (width // 2, height // 2)
+            for i in range(26):
+                angle = p * np.pi * 6 + i * 0.45
+                radius = 12 + i * 11
+                x = int(center[0] + np.cos(angle) * radius)
+                y = int(center[1] + np.sin(angle) * radius * 0.55)
+                cv2.circle(frame, (x, y), 26, (180, 40 + i * 7 % 180, 255), -1, cv2.LINE_AA)
+        elif effect == "scene_wipe":
+            x = int(width * p)
+            frame[:, :x] = (220, 70, 30)
+            frame[:, x:] = (20, 180, 230)
+        elif effect == "ember_particles":
+            frame[:] = (4, 8, 16)
+            for i in range(24):
+                x = int(width * ((i * 37 % 101) / 100))
+                y = int(height * (1.0 - p) + (i * 19 % height) * 0.6)
+                cv2.circle(frame, (x, y), 6 + i % 9, (20, 120 + i * 5 % 120, 255), -1, cv2.LINE_AA)
+        elif effect == "negative_wave":
+            level = int(150 * max(0.0, 1.0 - p))
+            frame[:] = (level, level, level)
+            cv2.rectangle(frame, (0, 0), (int(width * p), height), (0, 0, 0), -1)
         return frame
 
     @staticmethod

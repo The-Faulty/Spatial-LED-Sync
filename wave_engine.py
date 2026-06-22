@@ -7,6 +7,7 @@ import numpy as np
 
 from config import EngineConfig
 from event_detector import LightEvent
+from event_mixer import should_duck_wave
 from topology import RoomTopology
 
 
@@ -23,6 +24,10 @@ class LightWave:
     radius_limit: float
     kind: str = "spill"
     color_velocity: float = 0.0
+    width: float = 1.0
+    pulse_count: int = 1
+    phase: float = 0.0
+    secondary: bool = False
 
 
 class WaveEngine:
@@ -57,23 +62,55 @@ class WaveEngine:
                     speed *= 2.2
                     spread *= 2.0
                     decay *= 0.90
-                self.waves.append(
-                    LightWave(
-                        color=event.color,
-                        intensity=event.intensity,
-                        position=float(position),
-                        velocity=speed,
-                        decay_rate=decay,
-                        spread_rate=spread,
-                        age=0.0,
-                        direction=direction,
-                        radius_limit=radius,
-                        kind=event.kind,
-                        color_velocity=color_velocity,
+                elif event.kind in {"shockwave", "directional_sweep", "scene_wipe"}:
+                    speed *= 1.55
+                    spread *= max(0.8, event.width)
+                    decay *= 0.95
+                elif event.kind in {"color_bloom", "underwater"}:
+                    speed *= 0.20
+                    spread *= 3.5
+                    decay = min(max(decay, 0.955), 0.975)
+                elif event.kind in {"lightning", "impact_pulse"}:
+                    speed *= 2.4
+                    spread *= 2.3
+                    decay *= 0.78
+                elif event.kind == "energy_trail":
+                    speed *= 1.7
+                    spread *= 0.75
+                    decay *= 0.90
+                elif event.kind == "ember_particles":
+                    speed *= 0.65
+                    spread = max(spread * 0.75, 3.0)
+                    decay *= 0.88
+                count = max(1, int(event.pulse_count if event.kind in {"ember_particles", "lightning"} else 1))
+                for pulse in range(count):
+                    pulse_phase = event.phase + pulse / max(1, count)
+                    self.waves.append(
+                        LightWave(
+                            color=event.color,
+                            intensity=event.intensity * (1.0 - pulse * 0.035),
+                            position=(float(position) + pulse_phase * self.config.total_leds * 0.2) % self.config.total_leds,
+                            velocity=speed * (0.85 + pulse_phase * 0.35),
+                            decay_rate=decay,
+                            spread_rate=spread,
+                            age=0.0,
+                            direction=direction,
+                            radius_limit=radius,
+                            kind=event.kind,
+                            color_velocity=color_velocity,
+                            width=max(0.05, event.width),
+                            pulse_count=count,
+                            phase=pulse_phase,
+                            secondary=event.secondary,
+                        )
                     )
-                )
         if len(self.waves) > self.config.max_active_waves:
             self.waves = sorted(self.waves, key=lambda w: w.intensity, reverse=True)[: self.config.max_active_waves]
+
+    def duck_lower_priority_waves(self, primary_kind: str, factor: float = 0.35) -> None:
+        for wave in self.waves:
+            if should_duck_wave(primary_kind, wave.kind):
+                wave.intensity *= factor
 
     def set_tv_frame(self, frame_bgr: np.ndarray | None) -> None:
         return None
@@ -102,10 +139,10 @@ class WaveEngine:
             return self._front_ambient_boundary_specs(event)
 
         origin = self.topology.origin_for_edge(event.edge, event.intensity)
-        if event.kind in ("explosion", "flash"):
+        if event.kind in ("explosion", "flash", "impact_pulse", "shockwave", "color_bloom", "underwater", "portal_vortex", "negative_wave", "ember_particles"):
             radius = self.config.total_leds / 2
             directions = (-1, 1)
-        elif event.kind == "camera_pan" and event.direction_hint:
+        elif event.kind in {"camera_pan", "directional_sweep", "scene_wipe", "energy_trail"} and event.direction_hint:
             radius = self.config.total_leds / 2 if event.intensity > 0.55 else self.config.strong_spill_radius
             directions = (event.direction_hint,)
         else:
@@ -114,7 +151,7 @@ class WaveEngine:
         return [(origin.led, direction, radius) for direction in directions]
 
     def _front_ambient_boundary_specs(self, event: LightEvent) -> list[tuple[int, int, float]]:
-        if event.kind in ("explosion", "flash") or event.intensity >= self.config.room_fill_threshold:
+        if event.kind in ("explosion", "flash", "impact_pulse", "shockwave", "color_bloom", "underwater", "portal_vortex", "negative_wave") or event.intensity >= self.config.room_fill_threshold:
             radius = self.config.total_leds / 2
         elif event.intensity >= self.config.level2_threshold:
             radius = self.config.strong_spill_radius
@@ -222,13 +259,30 @@ class WaveEngine:
                 continue
             dist = self.topology.signed_distance(wave.position, led, wave.direction)
             reverse_dist = self.topology.signed_distance(wave.position, led, -wave.direction)
-            dist = min(dist, reverse_dist if wave.kind in ("flash", "explosion") else dist)
-            if dist > wave.spread_rate * 2.8:
+            bidirectional = wave.kind in {"flash", "explosion", "impact_pulse", "shockwave", "color_bloom", "underwater", "portal_vortex", "negative_wave"}
+            dist = min(dist, reverse_dist if bidirectional else dist)
+            spread_scale = 4.5 if wave.kind in {"color_bloom", "underwater"} else 2.8
+            if dist > wave.spread_rate * spread_scale:
                 continue
-            envelope = np.exp(-(dist ** 2) / (2.0 * max(1.0, wave.spread_rate) ** 2))
+            if wave.kind == "shockwave":
+                center = travelled
+                ring_width = max(1.0, wave.spread_rate * 0.45)
+                envelope = np.exp(-((dist - center) ** 2) / (2.0 * ring_width**2))
+            elif wave.kind in {"flame_shimmer", "underwater", "portal_vortex"}:
+                shimmer = 0.55 + 0.45 * np.sin(led * 0.37 + wave.age * (14.0 if wave.kind == "flame_shimmer" else 4.0) + wave.phase * 6.28) ** 2
+                envelope = np.exp(-(dist ** 2) / (2.0 * max(1.0, wave.spread_rate * spread_scale / 2.0) ** 2)) * shimmer
+            elif wave.kind == "energy_trail":
+                head = np.exp(-(dist ** 2) / (2.0 * max(1.0, wave.spread_rate) ** 2))
+                tail = np.exp(-((dist - wave.spread_rate * 3.0) ** 2) / (2.0 * max(1.0, wave.spread_rate * 2.2) ** 2)) * 0.45
+                envelope = max(head, tail)
+            else:
+                envelope = np.exp(-(dist ** 2) / (2.0 * max(1.0, wave.spread_rate) ** 2))
             travel_fade = max(0.0, 1.0 - travelled / max(1.0, wave.radius_limit))
             contribution = rgb * wave.intensity * envelope * (0.25 + 0.75 * travel_fade)
-            leds[led] += contribution
+            if wave.kind == "negative_wave":
+                leds[led] -= wave.intensity * envelope * 0.65
+            else:
+                leds[led] += contribution
 
     def _is_reserved_front_ambient_led(self, led: int) -> bool:
         if self.config.lighting_mode != "front_ambient":

@@ -10,10 +10,24 @@ from spatial_config import default_spatial_dict, parse_spatial_config, validate_
 
 DEFAULT_ENABLED_EFFECTS = {
     "front_ambient": True,
+    "ambient_side_spill": True,
     "spill": True,
+    "top_color_exit": True,
     "flash": True,
     "explosion": True,
     "camera_pan": True,
+    "energy_trail": True,
+    "shockwave": True,
+    "directional_sweep": True,
+    "lightning": True,
+    "impact_pulse": True,
+    "color_bloom": True,
+    "flame_shimmer": True,
+    "underwater": True,
+    "portal_vortex": True,
+    "scene_wipe": True,
+    "ember_particles": True,
+    "negative_wave": True,
 }
 
 

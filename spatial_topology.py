@@ -188,6 +188,33 @@ class SpatialRoomTopology:
             colors[unmapped] = self._sample_tv_rect(frame, unmapped)
         return colors
 
+    def ambient_extension_colors(self, frame_bgr: np.ndarray | None) -> np.ndarray:
+        colors = np.zeros((self.total, 3), dtype=np.float32)
+        if frame_bgr is None or frame_bgr.size == 0 or self.total <= 0:
+            return colors
+        frame = frame_bgr[:, :, ::-1].astype(np.float32) / 255.0
+        for strip in self.spatial.strips:
+            parent_id = strip.extends_strip_id.strip()
+            if strip.sync_mode != "spatial" or not parent_id or strip.extension_mode == "effects_only":
+                continue
+            parent = self.strips.get(parent_id)
+            role = self.effective_tv_role_for_strip(parent_id)
+            if parent is None or role == "none":
+                continue
+            start, end = self.strip_ranges.get(strip.id, (0, 0))
+            parent_start, parent_end = self.strip_ranges.get(parent_id, (0, 0))
+            idx = np.arange(start, end, dtype=np.int32)
+            parent_idx = np.arange(parent_start, parent_end, dtype=np.int32)
+            if idx.size == 0 or parent_idx.size == 0:
+                continue
+            parent_samples = self._sample_tv_role(frame, parent_idx, role)
+            edge_offset = self._nearest_parent_edge_offset(idx, parent_idx)
+            edge_color = parent_samples[edge_offset].reshape(1, 3)
+            fade = self._fade_from_parent_edge(idx, parent_idx[edge_offset], strip).reshape(-1, 1)
+            strength = float(np.clip(strip.extension_strength, 0.0, 1.0))
+            colors[idx] = np.clip(edge_color * fade * strength * 0.45, 0.0, 0.25)
+        return colors
+
     def effective_tv_role_for_strip(self, strip_id: str) -> str:
         return self._effective_role_by_strip.get(strip_id, "none")
 
@@ -343,6 +370,25 @@ class SpatialRoomTopology:
             padded = np.pad(smoothed, ((1, 1), (0, 0)), mode="edge")
             smoothed = padded[:-2] * 0.25 + padded[1:-1] * 0.5 + padded[2:] * 0.25
         return smoothed
+
+    def _nearest_parent_edge_offset(self, idx: np.ndarray, parent_idx: np.ndarray) -> int:
+        extension_endpoints = self.positions[[idx[0], idx[-1]]]
+        parent_endpoints = self.positions[[parent_idx[0], parent_idx[-1]]]
+        distances = np.linalg.norm(parent_endpoints[:, None, :] - extension_endpoints[None, :, :], axis=2)
+        return 0 if int(np.argmin(distances)) // 2 == 0 else parent_idx.size - 1
+
+    def _fade_from_parent_edge(self, idx: np.ndarray, parent_edge_idx: int, strip: SpatialStrip) -> np.ndarray:
+        distances = np.linalg.norm(self.positions[idx] - self.positions[parent_edge_idx].reshape(1, 3), axis=1)
+        if distances.size == 0:
+            return distances
+        min_distance = float(np.min(distances))
+        span = max(0.001, float(np.max(distances) - min_distance))
+        normalized = np.clip((distances - min_distance) / span, 0.0, 1.0)
+        softness = float(np.clip(strip.extension_softness, 0.0, 1.0))
+        falloff = 5.5 + softness * 4.5
+        if strip.extension_mode == "edge_reach":
+            falloff += 2.0
+        return np.exp(-normalized * falloff).astype(np.float32)
 
     def _extension_distance_from_tv_edge(self, idx: np.ndarray, role: str) -> np.ndarray:
         tv = self.spatial.tv

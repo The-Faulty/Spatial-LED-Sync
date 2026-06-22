@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 import cv2
 import numpy as np
 
-from config import EngineConfig
+from config import DEFAULT_ENABLED_EFFECTS, EngineConfig
 from effects_engine import HeadlessEffectsEngine, RuntimeSnapshot
 from spatial_config import pack_spatial_device_ranges, parse_spatial_config, spatial_config_to_dict, validate_spatial_config
 from spatial_topology import SpatialRoomTopology
@@ -91,10 +91,36 @@ class PreviewRuntimeManager:
                 led_count = 0
                 led_max = 0
                 lit_led_count = 0
+            enabled_effects = dict(DEFAULT_ENABLED_EFFECTS)
+            active_effect_counts: dict[str, int] = {}
+            runtime = self.runtime
+            if runtime is not None:
+                enabled_effects.update(runtime.config.enabled_effects)
+                renderer = runtime.wave_engine
+                waves = getattr(renderer, "waves", []) if renderer is not None else []
+                for wave in waves:
+                    kind = getattr(wave, "kind", "")
+                    if kind:
+                        active_effect_counts[kind] = active_effect_counts.get(kind, 0) + 1
+            triggered = [
+                {
+                    "kind": event.kind,
+                    "effect_id": event.effect_id or event.kind,
+                    "edge": event.edge,
+                    "intensity": event.intensity,
+                    "secondary": event.secondary,
+                    "primary": event.primary,
+                }
+                for event in snapshot.events
+            ]
             return {
                 "running": bool(self.runtime and self.runtime.running),
                 "fps": snapshot.fps,
                 "active_waves": snapshot.active_waves,
+                "active_effect_counts": active_effect_counts,
+                "triggered_effects": triggered,
+                "candidate_events": snapshot.candidate_events,
+                "enabled_effects": enabled_effects,
                 "buffered_frames": snapshot.buffered_frames,
                 "hyperhdr_connected": snapshot.hyperhdr_connected,
                 "wled_enabled": False,
@@ -170,6 +196,9 @@ class SpatialEditorHandler(BaseHTTPRequestHandler):
         if path == "/api/preview/stop":
             self._send_json(self.preview_manager.stop())
             return
+        if path == "/api/effects":
+            self._update_effects()
+            return
         if path != "/api/config":
             self.send_error(404)
             return
@@ -182,6 +211,10 @@ class SpatialEditorHandler(BaseHTTPRequestHandler):
         config = EngineConfig.load(self.config_path)
         if "spatial" in payload:
             config.spatial = pack_spatial_device_ranges(payload["spatial"], config.total_leds)
+        if isinstance(payload.get("enabled_effects"), dict):
+            config.enabled_effects.update(
+                {key: bool(value) for key, value in payload["enabled_effects"].items() if key in DEFAULT_ENABLED_EFFECTS}
+            )
         errors = config.validate()
         if errors:
             self._send_json({"ok": False, "errors": errors}, status=400)
@@ -197,6 +230,32 @@ class SpatialEditorHandler(BaseHTTPRequestHandler):
         spatial = parse_spatial_config(config.spatial, config.total_leds)
         config.spatial = spatial_config_to_dict(spatial)
         self._send_json({"config": config.to_dict(), "spatial": config.spatial})
+
+    def _update_effects(self) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+        except json.JSONDecodeError:
+            self._send_json({"ok": False, "errors": ["invalid JSON"]}, status=400)
+            return
+        requested = payload.get("enabled_effects")
+        if not isinstance(requested, dict):
+            self._send_json({"ok": False, "errors": ["enabled_effects must be an object"]}, status=400)
+            return
+        config = EngineConfig.load(self.config_path)
+        config.enabled_effects.update({key: bool(value) for key, value in requested.items() if key in DEFAULT_ENABLED_EFFECTS})
+        errors = config.validate()
+        if errors:
+            self._send_json({"ok": False, "errors": errors}, status=400)
+            return
+        config.save(self.config_path)
+        with self.preview_manager.lock:
+            runtime = self.preview_manager.runtime
+            if runtime is not None:
+                runtime.config.enabled_effects.update(config.enabled_effects)
+                if runtime.event_detector is not None:
+                    runtime.event_detector.config.enabled_effects.update(config.enabled_effects)
+        self._send_json({"ok": True, "enabled_effects": config.enabled_effects})
 
     def _send_preview_colors(self) -> None:
         config = EngineConfig.load(self.config_path)

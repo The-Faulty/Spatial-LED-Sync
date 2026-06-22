@@ -206,10 +206,24 @@ class CinematicSpillGUI:
 
         effects = self._section(self.motion_tab, "Enabled Effects", 2)
         self._checkbox(effects, 0, "Front ambient extension", "enabled_effects.front_ambient")
-        self._checkbox(effects, 1, "Motion spill waves", "enabled_effects.spill")
-        self._checkbox(effects, 2, "Screen flash pulses", "enabled_effects.flash")
-        self._checkbox(effects, 3, "Explosion waves", "enabled_effects.explosion")
-        self._checkbox(effects, 4, "Camera pan waves", "enabled_effects.camera_pan")
+        self._checkbox(effects, 1, "Ambient side spill", "enabled_effects.ambient_side_spill")
+        self._checkbox(effects, 2, "Motion spill waves", "enabled_effects.spill")
+        self._checkbox(effects, 3, "Top color exit", "enabled_effects.top_color_exit")
+        self._checkbox(effects, 4, "Screen flash pulses", "enabled_effects.flash")
+        self._checkbox(effects, 5, "Explosion waves", "enabled_effects.explosion")
+        self._checkbox(effects, 6, "Camera pan waves", "enabled_effects.camera_pan")
+        self._checkbox(effects, 7, "Energy trails", "enabled_effects.energy_trail")
+        self._checkbox(effects, 8, "Shockwaves", "enabled_effects.shockwave")
+        self._checkbox(effects, 9, "Directional sweeps", "enabled_effects.directional_sweep")
+        self._checkbox(effects, 10, "Lightning bursts", "enabled_effects.lightning")
+        self._checkbox(effects, 11, "Impact pulses", "enabled_effects.impact_pulse")
+        self._checkbox(effects, 12, "Color blooms", "enabled_effects.color_bloom")
+        self._checkbox(effects, 13, "Flame shimmer", "enabled_effects.flame_shimmer")
+        self._checkbox(effects, 14, "Underwater caustics", "enabled_effects.underwater")
+        self._checkbox(effects, 15, "Portal vortex", "enabled_effects.portal_vortex")
+        self._checkbox(effects, 16, "Scene wipes", "enabled_effects.scene_wipe")
+        self._checkbox(effects, 17, "Ember particles", "enabled_effects.ember_particles")
+        self._checkbox(effects, 18, "Negative waves", "enabled_effects.negative_wave")
 
     def _build_wave_tab(self) -> None:
         waves = self._section(self.wave_tab, "Spill & Waves", 0)
@@ -285,6 +299,16 @@ class CinematicSpillGUI:
                 ("Camera Pan Left", "pan_left"),
                 ("Camera Pan Right", "pan_right"),
                 ("Energy Trail", "energy_trail"),
+                ("Directional Sweep", "directional_sweep"),
+                ("Lightning", "lightning"),
+                ("Impact Pulse", "impact_pulse"),
+                ("Color Bloom", "color_bloom"),
+                ("Flame Shimmer", "flame_shimmer"),
+                ("Underwater", "underwater"),
+                ("Portal Vortex", "portal_vortex"),
+                ("Scene Wipe", "scene_wipe"),
+                ("Ember Particles", "ember_particles"),
+                ("Negative Wave", "negative_wave"),
             )
         ):
             ttk.Button(triggers, text=label, command=lambda name=effect: self.trigger_simulation(name)).grid(row=row, column=0, sticky=tk.EW, pady=3)

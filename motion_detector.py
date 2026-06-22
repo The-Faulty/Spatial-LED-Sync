@@ -10,6 +10,20 @@ from config import EngineConfig
 from frame_processor import FrameProcessor
 
 
+@dataclass(frozen=True)
+class AnalysisRequirements:
+    color_stats: bool = True
+    frame_difference: bool = True
+    edge_activity: bool = True
+    top_corner_activity: bool = True
+    optical_flow: bool = True
+    retain_flow_debug: bool = True
+
+    @property
+    def any_analysis(self) -> bool:
+        return self.color_stats or self.frame_difference or self.edge_activity or self.top_corner_activity or self.optical_flow
+
+
 @dataclass
 class EdgeMotion:
     magnitude: float = 0.0
@@ -45,11 +59,13 @@ class MotionDetector:
         self.previous_gray: np.ndarray | None = None
         self.history: deque[MotionAnalysis] = deque(maxlen=config.motion_history)
 
-    def analyze(self, frame: np.ndarray) -> MotionAnalysis:
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        stats = FrameProcessor.color_stats(frame)
+    def analyze(self, frame: np.ndarray, requirements: AnalysisRequirements | None = None) -> MotionAnalysis:
+        requirements = requirements or AnalysisRequirements()
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if requirements.frame_difference or requirements.optical_flow else None
+        stats = FrameProcessor.color_stats(frame) if requirements.color_stats else {"brightness": 0.0, "saturation": 0.0, "color": (0, 0, 0)}
         if self.previous_gray is None:
-            self.previous_gray = gray
+            if gray is not None:
+                self.previous_gray = gray
             analysis = MotionAnalysis(
                 brightness=float(stats["brightness"]),
                 saturation=float(stats["saturation"]),
@@ -58,10 +74,14 @@ class MotionDetector:
             self.history.append(analysis)
             return analysis
 
-        if self.config.motion_algorithm == "frame_difference":
-            analysis = self._frame_difference(frame, gray)
+        if gray is None or self.previous_gray is None:
+            analysis = MotionAnalysis()
+        elif requirements.optical_flow and self.config.motion_algorithm != "frame_difference":
+            analysis = self._optical_flow(frame, gray, requirements)
+        elif requirements.frame_difference or requirements.edge_activity or requirements.top_corner_activity:
+            analysis = self._frame_difference(frame, gray, requirements)
         else:
-            analysis = self._optical_flow(frame, gray)
+            analysis = MotionAnalysis()
 
         prev = self.history[-1] if self.history else None
         analysis.brightness = float(stats["brightness"])
@@ -72,11 +92,12 @@ class MotionDetector:
         if prev:
             self._apply_edge_color_velocity(analysis, prev)
         analysis.scene_change = analysis.changed_fraction > self.config.flash_changed_fraction
-        self.previous_gray = gray
+        if gray is not None:
+            self.previous_gray = gray
         self.history.append(analysis)
         return analysis
 
-    def _optical_flow(self, frame: np.ndarray, gray: np.ndarray) -> MotionAnalysis:
+    def _optical_flow(self, frame: np.ndarray, gray: np.ndarray, requirements: AnalysisRequirements) -> MotionAnalysis:
         flow = cv2.calcOpticalFlowFarneback(
             self.previous_gray,
             gray,
@@ -96,14 +117,16 @@ class MotionDetector:
             changed_fraction=float(np.mean(changed > 22)),
             dominant_flow=(float(np.mean(flow[:, :, 0])), float(np.mean(flow[:, :, 1]))),
             flow_confidence=float(np.clip(np.mean(mag) / 4.0, 0.0, 1.0)),
-            flow_vectors=flow,
-            heatmap=heatmap,
+            flow_vectors=flow if requirements.retain_flow_debug else None,
+            heatmap=heatmap if requirements.retain_flow_debug else None,
         )
-        analysis.edge_activity = self._edge_motion_from_flow(frame, flow, mag)
-        analysis.top_corner_activity = self._top_corner_motion_from_flow(frame, flow, mag)
+        if requirements.edge_activity:
+            analysis.edge_activity = self._edge_motion_from_flow(frame, flow, mag)
+        if requirements.top_corner_activity:
+            analysis.top_corner_activity = self._top_corner_motion_from_flow(frame, flow, mag)
         return analysis
 
-    def _frame_difference(self, frame: np.ndarray, gray: np.ndarray) -> MotionAnalysis:
+    def _frame_difference(self, frame: np.ndarray, gray: np.ndarray, requirements: AnalysisRequirements) -> MotionAnalysis:
         diff = cv2.absdiff(gray, self.previous_gray)
         _, mask = cv2.threshold(diff, 22, 255, cv2.THRESH_BINARY)
         moments = cv2.moments(mask)
@@ -123,11 +146,13 @@ class MotionDetector:
             changed_fraction=float(np.mean(mask > 0)),
             dominant_flow=(float(vector[0]), float(vector[1])),
             flow_confidence=float(np.clip(np.mean(mask > 0) * 3.0, 0.0, 1.0)),
-            edge_activity=self._edge_motion_from_flow(frame, pseudo_flow, mag),
-            flow_vectors=pseudo_flow,
-            heatmap=heatmap,
+            flow_vectors=pseudo_flow if requirements.retain_flow_debug else None,
+            heatmap=heatmap if requirements.retain_flow_debug else None,
         )
-        analysis.top_corner_activity = self._top_corner_motion_from_flow(frame, pseudo_flow, mag)
+        if requirements.edge_activity:
+            analysis.edge_activity = self._edge_motion_from_flow(frame, pseudo_flow, mag)
+        if requirements.top_corner_activity:
+            analysis.top_corner_activity = self._top_corner_motion_from_flow(frame, pseudo_flow, mag)
         return analysis
 
     def _edge_motion_from_flow(self, frame: np.ndarray, flow: np.ndarray, mag: np.ndarray) -> dict[str, EdgeMotion]:

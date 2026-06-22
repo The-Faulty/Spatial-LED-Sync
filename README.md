@@ -69,7 +69,7 @@ Important fields:
 - `lighting_mode`: `cinematic` keeps the original sparse spill behavior; `front_ambient` makes the front wall behave more like a soft TV extension while side/rear walls stay reserved for major effects.
 - `front_ambient_source`: `top_strip` mirrors the top band of the incoming video onto the TV span; `average` uses the older single-color ambient wash.
 - `front_ambient_top_height`: fraction of the video height sampled for the top ambient strip.
-- `enabled_effects`: per-effect switches for front ambient, spill, flash, explosion, and camera pan events.
+- `enabled_effects`: per-effect switches for front ambient, ambient side spill, spill, top color exit, flash, explosion, camera pan, energy trail, shockwave, directional sweep, lightning, impact pulse, color bloom, flame shimmer, underwater caustics, portal vortex, scene wipe, ember particles, and negative wave events.
 - `color_velocity_speed_boost`, `color_velocity_decay_boost`: tune how fast color changes affect wave speed and fade.
 - `top_color_exit_velocity_threshold`, `top_color_exit_motion_threshold`, `top_color_exit_coverage_threshold`: control when fast color motion along the top band spills out through the left or right room edge.
 
@@ -135,7 +135,23 @@ Events are scored from `0.0` to `1.0` using configurable weights:
 
 Level 1 stays close to the TV, Level 2 reaches the front wall and corners, and Level 3 can fill the room.
 
-In `front_ambient` mode, the TV span on the front wall receives a continuous top-strip sample from the current frame, similar to mirroring the TV's top Ambilight/backlight zone. Left, right, and bottom edge propagation is gated by `side_major_threshold`, so side walls remain mostly dark unless a stronger event occurs. Motion, flash, explosion, and pan events can also be enabled or disabled individually.
+In `front_ambient` mode, the TV span on the front wall receives a continuous top-strip sample from the current frame, similar to mirroring the TV's top Ambilight/backlight zone. Left, right, and bottom edge propagation is gated by `side_major_threshold`, so side walls remain mostly dark unless a stronger event occurs. Each effect can also be enabled or disabled individually.
+
+Additional cinematic effects include:
+
+- `ambient_side_spill`: subtle renderer-side bleed of the nearest parent strip edge color into spatial extension strips, fading quickly so side strips do not mirror the full TV edge.
+- `energy_trail`: comet-like tails from fast bright objects exiting screen edges.
+- `shockwave`: thin expanding rings from hard impacts or sudden cuts.
+- `directional_sweep`: broad room washes from strong directional motion.
+- `lightning`: short high-contrast strobe bursts.
+- `impact_pulse`: whole-room blooms from sudden motion or brightness spikes.
+- `color_bloom`: slow atmospheric washes from saturated stable scenes.
+- `flame_shimmer`: warm flickering edge shimmer.
+- `underwater`: blue/green caustic wavelets for calm scenes.
+- `portal_vortex`: spiral movement from complex center-heavy flow.
+- `scene_wipe`: room-wide directional wipes from fast scene transitions.
+- `ember_particles`: small fading sparks after explosions, lightning, or flame.
+- `negative_wave`: traveling dimming masks for dark transitions.
 
 ## Wave Propagation
 
@@ -152,6 +168,7 @@ Color velocity modifies each wave after detection. Fast color changes increase w
 - Keep `target_fps` and `wled_fps` near 25-30 for smooth output without flooding WLED.
 - Limit `max_active_waves` to bound CPU cost.
 - Run with `--no-debug` for live deployments.
+- Disabled effects reduce analysis work. Ambient/bloom-only modes skip optical flow, flash/pulse-only modes use frame differencing without edge flow, and fully disabled event effects skip motion/event analysis while TV-image sync still works.
 
 ## HyperHDR Input Note
 

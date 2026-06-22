@@ -8,6 +8,7 @@ import numpy as np
 
 from config import EngineConfig
 from event_detector import LightEvent
+from event_mixer import should_duck_wave
 from spatial_topology import SpatialRoomTopology
 
 
@@ -16,6 +17,9 @@ class SpatialRenderer(Protocol):
     accepts_front_ambient_strip_sample: bool
 
     def add_events(self, events: list[LightEvent]) -> None:
+        ...
+
+    def duck_lower_priority_waves(self, primary_kind: str, factor: float = 0.35) -> None:
         ...
 
     def set_tv_frame(self, frame_bgr: np.ndarray | None) -> None:
@@ -43,6 +47,11 @@ class SpatialLightWave:
     radius_limit: float
     kind: str
     color_velocity: float = 0.0
+    direction_hint: int = 0
+    width: float = 1.0
+    pulse_count: int = 1
+    phase: float = 0.0
+    secondary: bool = False
 
 
 class VectorizedSpatialRenderer:
@@ -76,24 +85,61 @@ class VectorizedSpatialRenderer:
                 speed *= 2.2
                 spread *= 2.0
                 decay *= 0.90
+            elif event.kind in {"shockwave", "scene_wipe", "directional_sweep"}:
+                speed *= 1.55
+                spread *= max(0.7, event.width)
+                decay *= 0.95
+            elif event.kind in {"color_bloom", "underwater"}:
+                speed *= 0.25
+                spread *= 3.0
+                decay = min(max(decay, 0.955), 0.975)
+            elif event.kind in {"lightning", "impact_pulse"}:
+                speed *= 2.5
+                spread *= 2.5
+                decay *= 0.78
+            elif event.kind == "energy_trail":
+                speed *= 1.7
+                spread *= 0.75
+                decay *= 0.90
+            elif event.kind == "ember_particles":
+                speed *= 0.55
+                spread = max(spread * 0.75, diagonal * 0.06)
+                decay *= 0.88
             radius_limit = self._radius_limit(event.intensity, event.kind)
             origin = self.topology.room_center() if event.kind in {"flash", "explosion"} else self.topology.event_origin_point(event.edge)
-            self.waves.append(
-                SpatialLightWave(
-                    color=event.color,
-                    intensity=event.intensity,
-                    origin=origin,
-                    speed=speed,
-                    decay_rate=decay,
-                    spread=spread,
-                    age=0.0,
-                    radius_limit=radius_limit,
-                    kind=event.kind,
-                    color_velocity=color_velocity,
+            count = max(1, int(event.pulse_count if event.kind in {"ember_particles", "lightning"} else 1))
+            for pulse in range(count):
+                pulse_phase = event.phase + pulse / max(1, count)
+                offset = np.zeros(3, dtype=np.float32)
+                if event.kind in {"ember_particles", "lightning"}:
+                    angle = pulse_phase * np.pi * 2.0
+                    offset = np.array([np.cos(angle), 0.25 * np.sin(angle * 1.7), np.sin(angle)], dtype=np.float32) * diagonal * 0.12
+                self.waves.append(
+                    SpatialLightWave(
+                        color=event.color,
+                        intensity=event.intensity * (1.0 - pulse * 0.035),
+                        origin=origin + offset,
+                        speed=speed * (0.85 + pulse_phase * 0.35),
+                        decay_rate=decay,
+                        spread=spread,
+                        age=0.0,
+                        radius_limit=radius_limit,
+                        kind=event.kind,
+                        color_velocity=color_velocity,
+                        direction_hint=event.direction_hint,
+                        width=max(0.05, event.width),
+                        pulse_count=count,
+                        phase=pulse_phase,
+                        secondary=event.secondary,
+                    )
                 )
-            )
         if len(self.waves) > self.config.max_active_waves:
             self.waves = sorted(self.waves, key=lambda wave: wave.intensity, reverse=True)[: self.config.max_active_waves]
+
+    def duck_lower_priority_waves(self, primary_kind: str, factor: float = 0.35) -> None:
+        for wave in self.waves:
+            if should_duck_wave(primary_kind, wave.kind):
+                wave.intensity *= factor
 
     def set_tv_frame(self, frame_bgr: np.ndarray | None) -> None:
         self.tv_frame = frame_bgr
@@ -129,14 +175,45 @@ class VectorizedSpatialRenderer:
                 continue
             active.append(wave)
             distances = np.linalg.norm(positions - wave.origin.reshape(1, 3), axis=1)
-            if wave.kind in {"flash", "explosion"}:
+            if wave.kind in {"flash", "explosion", "impact_pulse"}:
                 fill_radius = max(wave.spread, travelled + wave.spread)
                 envelope = np.exp(-(distances**2) / (2.0 * fill_radius**2))
+            elif wave.kind == "shockwave":
+                ring_width = max(wave.spread * 0.45, wave.width * 0.08)
+                envelope = np.exp(-((distances - travelled) ** 2) / (2.0 * ring_width**2))
+            elif wave.kind in {"directional_sweep", "scene_wipe"}:
+                axis = positions[:, 0] if abs(wave.direction_hint) >= 0 else positions[:, 2]
+                room = self.topology.spatial.room
+                span = max(room.width, room.depth, 0.1)
+                front = (travelled / max(0.1, wave.radius_limit)) * span
+                if wave.direction_hint < 0:
+                    front = span - front
+                envelope = np.exp(-((axis - front) ** 2) / (2.0 * max(0.12, wave.width * 0.25) ** 2))
+            elif wave.kind == "energy_trail":
+                head = np.exp(-((distances - travelled) ** 2) / (2.0 * wave.spread**2))
+                tail = np.exp(-((distances - max(0.0, travelled - wave.spread * 3.0)) ** 2) / (2.0 * (wave.spread * 2.2) ** 2)) * 0.45
+                envelope = np.maximum(head, tail)
+            elif wave.kind == "flame_shimmer":
+                noise = 0.65 + 0.35 * np.sin((positions[:, 0] * 7.0 + positions[:, 2] * 5.0 + wave.age * 18.0 + wave.phase * 6.28))
+                envelope = np.exp(-(distances**2) / (2.0 * max(wave.spread * 2.4, 0.1) ** 2)) * noise
+            elif wave.kind == "underwater":
+                ripple = 0.45 + 0.55 * np.sin(distances * 6.0 - wave.age * 4.0 + wave.phase * 6.28) ** 2
+                envelope = np.exp(-(distances**2) / (2.0 * max(wave.spread * 5.0, 0.1) ** 2)) * ripple
+            elif wave.kind == "portal_vortex":
+                centered = positions - self.topology.room_center().reshape(1, 3)
+                angles = np.arctan2(centered[:, 2], centered[:, 0])
+                spiral = 0.5 + 0.5 * np.sin(angles * 3.0 * max(1, wave.direction_hint) + distances * 4.0 - wave.age * 6.0)
+                envelope = np.exp(-((distances - travelled * 0.45) ** 2) / (2.0 * (wave.spread * 2.5) ** 2)) * spiral
+            elif wave.kind in {"color_bloom", "lightning", "ember_particles"}:
+                envelope = np.exp(-(distances**2) / (2.0 * max(wave.spread * (4.0 if wave.kind == "color_bloom" else 1.0), 0.1) ** 2))
             else:
                 envelope = np.exp(-((distances - travelled) ** 2) / (2.0 * wave.spread**2))
             travel_fade = max(0.0, 1.0 - travelled / max(0.1, wave.radius_limit))
             contribution = (np.array(wave.color, dtype=np.float32) / 255.0) * wave.intensity * (0.2 + 0.8 * travel_fade)
-            leds[self._spatial_mask] += envelope[self._spatial_mask].reshape(-1, 1) * contribution
+            if wave.kind == "negative_wave":
+                leds[self._spatial_mask] -= envelope[self._spatial_mask].reshape(-1, 1) * wave.intensity * 0.65
+            else:
+                leds[self._spatial_mask] += envelope[self._spatial_mask].reshape(-1, 1) * contribution
         self.waves = active
         if self.front_ambient_intensity > self.config.wave_min_intensity:
             leds[self._tv_mask] += self.front_ambient_color * self.front_ambient_intensity
@@ -150,11 +227,17 @@ class VectorizedSpatialRenderer:
         blend = np.array([mode == "blend" for mode in self.topology.sync_modes], dtype=bool)
         leds[tv_only] = tv_colors[tv_only]
         leds[blend] = leds[blend] * (1.0 - self._blend[blend]) + tv_colors[blend] * self._blend[blend]
+        if self.config.enabled_effects.get("ambient_side_spill", True):
+            ambient = self.topology.ambient_extension_colors(self.tv_frame)
+            ambient_mask = np.any(ambient > 0.0, axis=1)
+            leds[ambient_mask] = np.maximum(leds[ambient_mask], ambient[ambient_mask])
 
     def _radius_limit(self, intensity: float, kind: str) -> float:
         diagonal = max(0.1, self.topology.room_diagonal())
-        if kind in {"flash", "explosion"} or intensity >= self.config.room_fill_threshold:
+        if kind in {"flash", "explosion", "impact_pulse", "shockwave", "color_bloom", "underwater", "portal_vortex", "negative_wave", "ember_particles"} or intensity >= self.config.room_fill_threshold:
             return diagonal
+        if kind in {"directional_sweep", "scene_wipe"}:
+            return diagonal * 0.9
         if intensity >= self.config.level2_threshold:
             return diagonal * 0.65
         if intensity >= self.config.level1_threshold:

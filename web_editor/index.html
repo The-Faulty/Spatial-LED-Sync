@@ -33,6 +33,17 @@
         </fieldset>
 
         <fieldset>
+          <legend>Effects</legend>
+          <div id="effect-toggles" class="effect-grid"></div>
+          <div class="effect-live">
+            <div class="effect-live-title">Triggering now</div>
+            <div id="triggered-effects" class="effect-list empty">None</div>
+            <div class="effect-live-title">Active render waves</div>
+            <div id="active-effects" class="effect-list empty">None</div>
+          </div>
+        </fieldset>
+
+        <fieldset>
           <legend>Room</legend>
           <label>Width <input id="room-width" type="number" min="0.1" step="0.1" /></label>
           <label>Depth <input id="room-depth" type="number" min="0.1" step="0.1" /></label>

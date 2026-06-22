@@ -10,9 +10,10 @@ import numpy as np
 
 from config import EngineConfig
 from event_detector import EventDetector, LightEvent
+from event_mixer import EventMixer, is_high_energy_primary
 from frame_processor import FrameProcessor
 from hyperhdr_client import HyperHDRClient
-from motion_detector import MotionAnalysis, MotionDetector
+from motion_detector import AnalysisRequirements, MotionAnalysis, MotionDetector
 from performance import apply_runtime_profile
 from spatial_config import parse_spatial_config
 from spatial_renderer import SpatialRenderer, VectorizedSpatialRenderer
@@ -41,6 +42,7 @@ class RuntimeSnapshot:
     analysis_frames: int = 0
     skipped_analysis_frames: int = 0
     step_ms: float = 0.0
+    candidate_events: int = 0
 
 
 class EffectsEngine(Protocol):
@@ -78,6 +80,7 @@ class HeadlessEffectsEngine:
         self.processor: FrameProcessor | None = None
         self.motion: MotionDetector | None = None
         self.event_detector: EventDetector | None = None
+        self.event_mixer = EventMixer()
         self.wave_engine: SpatialRenderer | WaveEngine | None = None
         self.wled: WLEDOutput | None = None
         self.client: HyperHDRClient | None = None
@@ -92,6 +95,30 @@ class HeadlessEffectsEngine:
         self._analysis_tick = 0
         self.frame_history: deque[np.ndarray] = deque(maxlen=12)
         self.snapshot = RuntimeSnapshot()
+
+    def analysis_requirements(self) -> AnalysisRequirements:
+        enabled = {name for name, active in self.config.enabled_effects.items() if active}
+        if not enabled:
+            return AnalysisRequirements(False, False, False, False, False, False)
+
+        color_only = {"front_ambient", "color_bloom", "underwater"}
+        frame_only = {"flash", "explosion", "shockwave", "lightning", "impact_pulse", "negative_wave"}
+        edge_effects = {"spill", "top_color_exit", "flame_shimmer"}
+        full_flow = {"camera_pan", "portal_vortex", "directional_sweep", "scene_wipe", "energy_trail"}
+
+        needs_full_flow = bool(enabled & full_flow)
+        needs_edges = bool(enabled & edge_effects) or needs_full_flow
+        needs_corners = "top_color_exit" in enabled or needs_full_flow
+        needs_difference = bool(enabled & frame_only) or needs_edges or needs_full_flow
+        needs_color = bool(enabled & (color_only | frame_only | edge_effects | full_flow | {"ember_particles"}))
+        return AnalysisRequirements(
+            color_stats=needs_color,
+            frame_difference=needs_difference,
+            edge_activity=needs_edges,
+            top_corner_activity=needs_corners,
+            optical_flow=needs_full_flow or (needs_edges and self.config.motion_algorithm != "frame_difference"),
+            retain_flow_debug=needs_full_flow or needs_edges,
+        )
 
     def start(self) -> None:
         if self.running:
@@ -147,34 +174,46 @@ class HeadlessEffectsEngine:
         assert self.client and self.processor and self.motion and self.event_detector and self.wave_engine and self.wled
         started = time.monotonic()
         detected: list[LightEvent] = []
+        candidate_events = 0
         frame = self.snapshot.frame
         analysis = self.snapshot.analysis
         last_error = ""
 
         try:
+            requirements = self.analysis_requirements()
             raw_frames = self._frames_for_policy(timeout)
             for raw in raw_frames:
                 frame = self.processor.prepare(raw)
                 self.frame_history.append(frame.copy())
                 self.wave_engine.set_tv_frame(frame)
-                analysis = self.motion.analyze(frame)
-                self.analysis_frames += 1
-                detected = self.event_detector.detect(analysis)
-                log_events = [event for event in detected if event.kind != "front_ambient"]
-                if log_events:
-                    self.logger.info(
-                        "events: %s",
-                        ", ".join(f"{event.kind}:{event.edge}:{event.intensity:.2f}" for event in log_events),
-                    )
-                self.wave_engine.add_events(detected)
-                if (
-                    self.config.lighting_mode == "front_ambient"
-                    and self.config.front_ambient_source == "top_strip"
-                    and self.config.enabled_effects.get("front_ambient", True)
-                    and self.wave_engine.accepts_front_ambient_strip_sample
-                ):
-                    colors, intensity = self.processor.top_strip_colors(frame, self.wave_engine.front_ambient_led_count())
-                    self.wave_engine.set_front_ambient_strip(colors, intensity)
+                if requirements.any_analysis:
+                    analysis = self.motion.analyze(frame, requirements)
+                    self.analysis_frames += 1
+                    candidates = self.event_detector.detect(analysis)
+                    candidate_events = len(candidates)
+                    detected = self.event_mixer.mix(candidates)
+                    log_events = [event for event in detected if event.kind != "front_ambient"]
+                    if log_events:
+                        self.logger.info(
+                            "events: %s candidates=%d suppressed=%d",
+                            ", ".join(f"{'*' if event.primary else ''}{event.kind}:{event.edge}:{event.intensity:.2f}" for event in log_events),
+                            candidate_events,
+                            max(0, candidate_events - len(detected)),
+                        )
+                    primary = next((event for event in detected if event.primary), None)
+                    if primary and is_high_energy_primary(primary.kind):
+                        self.wave_engine.duck_lower_priority_waves(primary.kind)
+                    self.wave_engine.add_events(detected)
+                    if (
+                        self.config.lighting_mode == "front_ambient"
+                        and self.config.front_ambient_source == "top_strip"
+                        and self.config.enabled_effects.get("front_ambient", True)
+                        and self.wave_engine.accepts_front_ambient_strip_sample
+                    ):
+                        colors, intensity = self.processor.top_strip_colors(frame, self.wave_engine.front_ambient_led_count())
+                        self.wave_engine.set_front_ambient_strip(colors, intensity)
+                else:
+                    analysis = None
 
             now = time.monotonic()
             leds = self.wave_engine.step(now - self.last_step)
@@ -211,6 +250,7 @@ class HeadlessEffectsEngine:
                 analysis_frames=self.analysis_frames,
                 skipped_analysis_frames=self.skipped_analysis_frames,
                 step_ms=self.last_step_duration * 1000.0,
+                candidate_events=candidate_events,
             )
         except Exception as exc:
             last_error = str(exc)
@@ -271,4 +311,3 @@ class HeadlessEffectsEngine:
             return [frames[-1]]
 
         return frames
-

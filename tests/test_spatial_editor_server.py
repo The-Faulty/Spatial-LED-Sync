@@ -13,6 +13,7 @@ import numpy as np
 
 from config import EngineConfig
 from effects_engine import HeadlessEffectsEngine
+from event_detector import LightEvent
 from runtime import RuntimeSnapshot
 from spatial_config import default_spatial_dict
 from spatial_editor_server import SpatialEditorHandler
@@ -78,6 +79,16 @@ class EditorServerCase(unittest.TestCase):
 
     def post_path(self, path: str) -> dict:
         request = urllib.request.Request(self.base_url + path, data=b"{}", method="POST")
+        with urllib.request.urlopen(request, timeout=3) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def post_json(self, path: str, payload: dict) -> dict:
+        request = urllib.request.Request(
+            self.base_url + path,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
         with urllib.request.urlopen(request, timeout=3) as response:
             return json.loads(response.read().decode("utf-8"))
 
@@ -173,6 +184,38 @@ class EditorServerCase(unittest.TestCase):
         self.assertEqual(saved["extension_strength"], 0.75)
         self.assertEqual(saved["extension_softness"], 0.25)
 
+    def test_effect_toggles_persist_and_update_preview_runtime(self) -> None:
+        started = self.post_path("/api/preview/start")
+        self.assertTrue(started["running"], started)
+        payload = self.post_json("/api/effects", {"enabled_effects": {"shockwave": False, "ambient_side_spill": False}})
+        self.assertTrue(payload["ok"], payload)
+        self.assertFalse(payload["enabled_effects"]["shockwave"])
+        self.assertFalse(payload["enabled_effects"]["ambient_side_spill"])
+        saved = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertFalse(saved["enabled_effects"]["shockwave"])
+        runtime = SpatialEditorHandler.preview_manager.runtime
+        self.assertIsNotNone(runtime)
+        self.assertFalse(runtime.config.enabled_effects["shockwave"])
+        status = self.get_json("/api/preview/status")
+        self.assertIn("enabled_effects", status)
+        self.assertFalse(status["enabled_effects"]["shockwave"])
+
+    def test_preview_status_reports_triggered_effects(self) -> None:
+        manager = SpatialEditorHandler.preview_manager
+        with manager.lock:
+            manager.last_snapshot = RuntimeSnapshot(
+                events=[
+                    LightEvent(edge="left", intensity=0.7, color=(255, 80, 20), kind="energy_trail", effect_id="energy_trail", primary=True),
+                    LightEvent(edge="top", intensity=0.4, color=(255, 180, 80), kind="ember_particles", effect_id="ember_particles", secondary=True),
+                ]
+            )
+        status = self.get_json("/api/preview/status")
+        effects = status.get("triggered_effects", [])
+        self.assertEqual(effects[0]["effect_id"], "energy_trail")
+        self.assertEqual(effects[0]["edge"], "left")
+        self.assertTrue(effects[0]["primary"])
+        self.assertTrue(effects[1]["secondary"])
+
     def test_preview_runtime_endpoints_force_wled_off(self) -> None:
         raw = json.loads(self.config_path.read_text(encoding="utf-8"))
         raw["send_to_wled"] = True
@@ -251,9 +294,17 @@ class EditorServerCase(unittest.TestCase):
         self.assertIn(b'id="view-2d"', index)
         self.assertIn(b'id="view-3d"', index)
         self.assertIn(b'id="scene3d"', index)
+        self.assertIn(b'id="effect-toggles"', index)
+        self.assertIn(b'id="triggered-effects"', index)
+        self.assertIn(b'id="active-effects"', index)
         self.assertIn(b'type="importmap"', index)
         self.assertIn(b"/vendor/three.module.js", index)
         self.assertIn(b"/api/preview/frame.jpg", app)
+        self.assertIn(b"/api/effects", app)
+        self.assertIn(b"active_effect_counts", app)
+        self.assertIn(b"triggered_effects", app)
+        self.assertIn(b"Primary:", app)
+        self.assertIn(b"Ambient side spill", app)
         self.assertIn(b"leds_flat", app)
         self.assertIn(b"LED rev", app)
         self.assertIn(b"Frame rev", app)

@@ -484,6 +484,117 @@ class SpatialRuntimeTests(unittest.TestCase):
         self.assertGreater(int(leds[3:, 0].max()), 40)
         self.assertLess(int(leds[3:, 0].max()), 120)
 
+    def test_ambient_side_spill_carries_parent_edge_color_only(self) -> None:
+        spatial = spatial_config()
+        parent = dict(
+            spatial["strips"][0],
+            id="parent",
+            start_u=1.3,
+            end_u=2.7,
+            led_count=3,
+            tv_role="top",
+            sync_mode="tv_image",
+            device_id="left",
+            device_start=0,
+        )
+        extension = dict(
+            parent,
+            id="ambient-extension",
+            tv_role="none",
+            extends_strip_id="parent",
+            start_u=2.7,
+            end_u=3.4,
+            sync_mode="spatial",
+            extension_mode="soft_spill",
+            extension_strength=0.6,
+            extension_softness=0.65,
+            device_id="right",
+            device_start=0,
+        )
+        spatial["strips"] = [parent, extension]
+        config = EngineConfig(total_leds=6, spatial=spatial)
+        topology = SpatialRoomTopology(config)
+        frame = np.zeros((5, 5, 3), dtype=np.uint8)
+        frame[0, :, 0] = np.array([255, 255, 128, 0, 0], dtype=np.uint8)
+        frame[0, :, 2] = np.array([0, 0, 128, 255, 255], dtype=np.uint8)
+        colors = topology.ambient_extension_colors(frame)
+        near = colors[3]
+        far = colors[5]
+        self.assertGreater(float(near[0]), 0.05)
+        self.assertLess(float(near[2]), float(near[0]) * 0.25)
+        self.assertLess(float(far.max()), float(near.max()) * 0.05)
+
+    def test_ambient_side_spill_can_be_disabled(self) -> None:
+        spatial = spatial_config()
+        parent = dict(
+            spatial["strips"][0],
+            id="parent",
+            start_u=1.3,
+            end_u=2.7,
+            led_count=3,
+            tv_role="top",
+            sync_mode="tv_image",
+            device_id="left",
+            device_start=0,
+        )
+        extension = dict(
+            parent,
+            id="ambient-extension",
+            tv_role="none",
+            extends_strip_id="parent",
+            sync_mode="spatial",
+            extension_mode="soft_spill",
+            extension_strength=0.6,
+            extension_softness=0.65,
+            device_id="right",
+            device_start=0,
+        )
+        spatial["strips"] = [parent, extension]
+        config = EngineConfig(total_leds=6, spatial=spatial, brightness=1.0, gamma=1.0, color_smoothing=0.0)
+        config.enabled_effects["ambient_side_spill"] = False
+        topology = SpatialRoomTopology(config)
+        renderer = VectorizedSpatialRenderer(config, topology)
+        frame = np.zeros((5, 5, 3), dtype=np.uint8)
+        frame[0, :, 2] = 255
+        renderer.set_tv_frame(frame)
+        leds = renderer.step(0.1)
+        self.assertGreater(int(leds[:3, 0].max()), 240)
+        self.assertEqual(int(leds[3:].max()), 0)
+
+    def test_ambient_side_spill_respects_effects_only_extension(self) -> None:
+        spatial = spatial_config()
+        parent = dict(
+            spatial["strips"][0],
+            id="parent",
+            start_u=1.3,
+            end_u=2.7,
+            led_count=3,
+            tv_role="top",
+            sync_mode="tv_image",
+            device_id="left",
+            device_start=0,
+        )
+        extension = dict(
+            parent,
+            id="effects-only-extension",
+            tv_role="none",
+            extends_strip_id="parent",
+            sync_mode="spatial",
+            extension_mode="effects_only",
+            device_id="right",
+            device_start=0,
+        )
+        spatial["strips"] = [parent, extension]
+        config = EngineConfig(total_leds=6, spatial=spatial, brightness=1.0, gamma=1.0, color_smoothing=0.0)
+        topology = SpatialRoomTopology(config)
+        renderer = VectorizedSpatialRenderer(config, topology)
+        frame = np.zeros((5, 5, 3), dtype=np.uint8)
+        frame[0, :, 2] = 255
+        renderer.set_tv_frame(frame)
+        leds = renderer.step(0.1)
+        self.assertGreater(int(leds[:3, 0].max()), 240)
+        self.assertEqual(int(leds[3:].max()), 0)
+
     def test_effects_only_extension_with_tv_image_sync_receives_no_tv_color(self) -> None:
         spatial = spatial_config()
         parent = dict(
