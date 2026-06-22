@@ -9,8 +9,11 @@ const LIGHTMAP_RADIUS_METERS = 0.9;
 const LIGHTMAP_ALPHA = 0.2;
 const TV_LIGHTMAP_CLEAR_MARGIN = 0.08;
 const MAX_DEVICE_PIXEL_RATIO = 2;
+const MAX_RENDER_FPS = 90;
+const RENDER_FRAME_MS = 1000 / MAX_RENDER_FPS;
+const RENDER_STATS_WINDOW = 60;
 
-export function createLightPreview3d({ canvas, fallback }) {
+export function createLightPreview3d({ canvas, fallback, onRenderStats } = {}) {
   let spatial = null;
   let previewColors = [];
   let previewImage = null;
@@ -31,6 +34,7 @@ export function createLightPreview3d({ canvas, fallback }) {
   let surfaceLightmaps = new Map();
   let lastLightmapColors = null;
   let raf = 0;
+  let renderTimer = 0;
   let loopRaf = 0;
   let sceneSignature = "";
   let lastImage = null;
@@ -38,6 +42,9 @@ export function createLightPreview3d({ canvas, fallback }) {
   let showGlow = true;
   let showMarkers = true;
   let showTv = true;
+  let lastLoopRenderAt = 0;
+  let lastRenderAt = 0;
+  let renderSamples = [];
 
   if (fallback) fallback.hidden = true;
 
@@ -71,6 +78,9 @@ export function createLightPreview3d({ canvas, fallback }) {
       requestRender();
     },
     render,
+    stats() {
+      return renderStats();
+    },
   };
 
   function ensureRenderer() {
@@ -124,32 +134,46 @@ export function createLightPreview3d({ canvas, fallback }) {
   }
 
   function requestRender() {
-    if (!active || raf || !renderer) return;
-    raf = requestAnimationFrame(() => {
-      raf = 0;
-      render();
-    });
+    if (!active || raf || renderTimer || !renderer) return;
+    const elapsed = performance.now() - lastRenderAt;
+    const delay = Math.max(0, RENDER_FRAME_MS - elapsed);
+    renderTimer = window.setTimeout(() => {
+      renderTimer = 0;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        render();
+      });
+    }, delay);
   }
 
   function startLoop() {
     if (loopRaf) return;
-    const tick = () => {
+    const tick = (now) => {
       loopRaf = 0;
       if (!active || !renderer) return;
-      render();
+      if (!lastLoopRenderAt || now - lastLoopRenderAt >= RENDER_FRAME_MS) {
+        lastLoopRenderAt = now;
+        render();
+      }
       loopRaf = requestAnimationFrame(tick);
     };
     loopRaf = requestAnimationFrame(tick);
   }
 
   function stopLoop() {
-    if (!loopRaf) return;
-    cancelAnimationFrame(loopRaf);
-    loopRaf = 0;
+    if (loopRaf) {
+      cancelAnimationFrame(loopRaf);
+      loopRaf = 0;
+    }
+    if (renderTimer) {
+      clearTimeout(renderTimer);
+      renderTimer = 0;
+    }
   }
 
   function render() {
     if (!active || !spatial || !ensureRenderer()) return;
+    const started = performance.now();
     const nextSignature = makeSceneSignature();
     if (nextSignature !== sceneSignature) {
       sceneSignature = nextSignature;
@@ -161,6 +185,24 @@ export function createLightPreview3d({ canvas, fallback }) {
     updateLedColors();
     updateSurfaceLightmaps();
     renderer.render(scene, camera);
+    lastRenderAt = performance.now();
+    recordRenderSample(performance.now() - started);
+  }
+
+  function recordRenderSample(ms) {
+    renderSamples.push(ms);
+    if (renderSamples.length > RENDER_STATS_WINDOW) renderSamples.shift();
+    if (typeof onRenderStats === "function") onRenderStats(renderStats());
+  }
+
+  function renderStats() {
+    if (!renderSamples.length) return { avgMs: 0, samples: 0, maxFps: MAX_RENDER_FPS };
+    const total = renderSamples.reduce((sum, value) => sum + value, 0);
+    return {
+      avgMs: total / renderSamples.length,
+      samples: renderSamples.length,
+      maxFps: MAX_RENDER_FPS,
+    };
   }
 
   function rebuildScene() {

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 import unittest.mock
+import time
 
 import numpy as np
 
@@ -9,6 +10,7 @@ from config import DEFAULT_ENABLED_EFFECTS, TRIGGER_EFFECTS, EngineConfig
 from effects_engine import HeadlessEffectsEngine
 from event_mixer import EventMixer
 from event_detector import EventDetector, LightEvent
+from frame_processor import FrameProcessor
 from hyperhdr_client import SIMULATION_EFFECT_PATTERNS, HyperHDRClient
 from motion_detector import AnalysisRequirements, EdgeMotion, MotionAnalysis, MotionDetector
 from spatial_config import default_spatial_dict
@@ -46,21 +48,98 @@ class EffectSuiteTests(unittest.TestCase):
         self.assertEqual(config.effect_sensitivity["shockwave"], 0.5)
         self.assertNotIn("front_ambient", config.effect_sensitivity)
         self.assertEqual(config.front_ambient_coverage, 1.0)
+        self.assertEqual(config.tv_image_blur, 0)
         self.assertEqual(config.ambient_side_spill_base_intensity, 0.45)
         self.assertEqual(config.ambient_side_spill_boost_intensity, 1.0)
         self.assertEqual(config.wled_protocol, "ddp")
         self.assertEqual(config.wled_udp_port, 4048)
         self.assertEqual(config.motion_analysis_fps, 15)
+        self.assertTrue(config.parallel_runtime)
+        self.assertEqual(config.tv_frame_queue_size, 1)
+        self.assertEqual(config.analysis_queue_size, 1)
+        self.assertEqual(config.event_queue_size, 2)
+        self.assertEqual(config.effect_render_skip_policy, "tv_first")
+        self.assertEqual(config.spatial_priority_bands, 3)
+        self.assertEqual(config.render_mode, "full_frame")
+        self.assertEqual(config.edge_band_width, 192)
+        self.assertEqual(config.edge_band_height, 108)
+        self.assertEqual(config.edge_band_fraction, 0.12)
+        self.assertEqual(config.hybrid_full_width, 64)
+        self.assertEqual(config.hybrid_full_height, 36)
 
     def test_invalid_wled_realtime_settings_fail_validation(self) -> None:
         config = EngineConfig()
         config.wled_protocol = "http"
         config.wled_udp_port = 70000
         config.motion_analysis_fps = 0
+        config.tv_frame_queue_size = 0
+        config.analysis_queue_size = 0
+        config.event_queue_size = 0
+        config.effect_render_skip_policy = "drop_tv"
+        config.spatial_priority_bands = 0
+        config.spatial_far_budget_ratio = 1.4
         errors = config.validate()
         self.assertTrue(any("wled_protocol" in error for error in errors))
         self.assertTrue(any("wled_udp_port" in error for error in errors))
         self.assertTrue(any("motion_analysis_fps" in error for error in errors))
+        self.assertTrue(any("tv_frame_queue_size" in error for error in errors))
+        self.assertTrue(any("analysis_queue_size" in error for error in errors))
+        self.assertTrue(any("event_queue_size" in error for error in errors))
+        self.assertTrue(any("effect_render_skip_policy" in error for error in errors))
+        self.assertTrue(any("spatial_priority_bands" in error for error in errors))
+        self.assertTrue(any("spatial_far_budget_ratio" in error for error in errors))
+
+    def test_invalid_render_mode_settings_fail_validation(self) -> None:
+        config = EngineConfig()
+        config.render_mode = "center_only"
+        config.edge_band_width = 0
+        config.edge_band_height = 0
+        config.hybrid_full_width = 0
+        config.hybrid_full_height = 0
+        config.edge_band_fraction = 0.8
+        errors = config.validate()
+        self.assertTrue(any("render_mode" in error for error in errors))
+        self.assertTrue(any("edge band dimensions" in error for error in errors))
+        self.assertTrue(any("hybrid full-frame dimensions" in error for error in errors))
+        self.assertTrue(any("edge_band_fraction" in error for error in errors))
+
+    def test_frame_processor_full_frame_render_frames(self) -> None:
+        config = EngineConfig(analysis_width=64, analysis_height=36)
+        frames = FrameProcessor(config).prepare_render_frames(np.zeros((80, 120, 3), dtype=np.uint8))
+        self.assertEqual(frames.tv_frame.shape, (36, 64, 3))
+        self.assertEqual(frames.analysis_frame.shape, (36, 64, 3))
+        self.assertEqual(frames.preview_frame.shape, (36, 64, 3))
+
+    def test_frame_processor_edge_effects_preserves_edges_and_fills_center(self) -> None:
+        config = EngineConfig(analysis_width=20, analysis_height=12, render_mode="edge_effects", edge_band_fraction=0.2)
+        source = np.zeros((12, 20, 3), dtype=np.uint8)
+        source[:] = (10, 20, 30)
+        source[:2, :] = (80, 90, 100)
+        frames = FrameProcessor(config).prepare_render_frames(source)
+        self.assertEqual(frames.tv_frame.shape, (12, 20, 3))
+        self.assertTrue(np.all(frames.tv_frame[:2, :] == (80, 90, 100)))
+        self.assertTrue(np.any(frames.tv_frame[4:8, 6:14] != (10, 20, 30)))
+
+    def test_frame_processor_hybrid_uses_split_frame_sizes(self) -> None:
+        config = EngineConfig(
+            render_mode="hybrid_edge_full",
+            edge_band_width=40,
+            edge_band_height=24,
+            hybrid_full_width=16,
+            hybrid_full_height=9,
+        )
+        frames = FrameProcessor(config).prepare_render_frames(np.zeros((90, 160, 3), dtype=np.uint8))
+        self.assertEqual(frames.tv_frame.shape, (24, 40, 3))
+        self.assertEqual(frames.analysis_frame.shape, (9, 16, 3))
+        self.assertEqual(frames.preview_frame.shape, (9, 16, 3))
+
+    def test_frame_processor_normalizes_grayscale_and_bgra(self) -> None:
+        config = EngineConfig(analysis_width=16, analysis_height=9)
+        processor = FrameProcessor(config)
+        gray = np.zeros((20, 20), dtype=np.uint8)
+        bgra = np.zeros((20, 20, 4), dtype=np.uint8)
+        self.assertEqual(processor.prepare_render_frames(gray).analysis_frame.shape, (9, 16, 3))
+        self.assertEqual(processor.prepare_render_frames(bgra).analysis_frame.shape, (9, 16, 3))
 
     def test_analysis_cadence_limits_motion_detection_rate(self) -> None:
         engine = HeadlessEffectsEngine(EngineConfig(target_fps=30, motion_analysis_fps=15), unittest.mock.Mock())
@@ -68,6 +147,59 @@ class EffectSuiteTests(unittest.TestCase):
         self.assertFalse(engine._analysis_due())
         engine.last_analysis_time -= 1.0
         self.assertTrue(engine._analysis_due())
+
+    def test_parallel_runtime_starts_renders_and_stops_workers(self) -> None:
+        config = EngineConfig(
+            total_leds=8,
+            spatial=spatial_config(8),
+            simulate_input=True,
+            send_to_wled=False,
+            target_fps=20,
+            motion_analysis_fps=10,
+            parallel_runtime=True,
+            analysis_width=32,
+            analysis_height=18,
+        )
+        engine = HeadlessEffectsEngine(config, unittest.mock.Mock())
+        engine.start()
+        try:
+            time.sleep(0.25)
+            snapshot = engine.latest_snapshot()
+            self.assertTrue(snapshot.running)
+            self.assertIsNotNone(snapshot.leds)
+            self.assertEqual(snapshot.leds.shape, (8, 3))
+            self.assertGreaterEqual(snapshot.tv_frames, 1)
+            self.assertGreaterEqual(snapshot.analysis_frames, 1)
+        finally:
+            analysis_thread = engine._analysis_thread
+            render_thread = engine._render_thread
+            engine.stop()
+        self.assertFalse(analysis_thread and analysis_thread.is_alive())
+        self.assertFalse(render_thread and render_thread.is_alive())
+
+    def test_parallel_runtime_skips_analysis_when_no_effect_needs_it(self) -> None:
+        config = EngineConfig(
+            total_leds=8,
+            spatial=spatial_config(8),
+            simulate_input=True,
+            send_to_wled=False,
+            target_fps=20,
+            motion_analysis_fps=10,
+            parallel_runtime=True,
+            enabled_effects={key: False for key in DEFAULT_ENABLED_EFFECTS},
+            analysis_width=32,
+            analysis_height=18,
+        )
+        engine = HeadlessEffectsEngine(config, unittest.mock.Mock())
+        engine.start()
+        try:
+            time.sleep(0.2)
+            snapshot = engine.latest_snapshot()
+            self.assertIsNotNone(snapshot.leds)
+            self.assertEqual(snapshot.analysis_frames, 0)
+            self.assertGreaterEqual(snapshot.tv_frames, 1)
+        finally:
+            engine.stop()
 
     def test_invalid_effect_sensitivity_fails_validation(self) -> None:
         config = EngineConfig()

@@ -127,6 +127,21 @@ class SpatialRuntimeTests(unittest.TestCase):
         self.assertEqual(leds.shape, (8, 3))
         self.assertGreater(int(leds.max()), 0)
 
+    def test_spatial_priority_budget_renders_near_tv_leds_first(self) -> None:
+        config = EngineConfig(total_leds=8, spatial=spatial_config(), brightness=1.0, gamma=1.0, color_smoothing=0.0, spatial_priority_bands=2)
+        topology = SpatialRoomTopology(config)
+        renderer = VectorizedSpatialRenderer(config, topology)
+        renderer.set_spatial_priority_budget(1)
+        near_indices = renderer._spatial_indices[renderer._spatial_priority_bands[0]]
+        far_indices = renderer._spatial_indices[renderer._spatial_priority_bands[1]]
+        renderer.add_events([LightEvent(edge="top", intensity=1.0, color=(255, 80, 20), kind="spill")])
+        renderer.waves[0].origin = topology.positions[int(near_indices[0])].copy()
+        renderer.waves[0].spread = 10.0
+        leds = renderer.step(0.1)
+        self.assertGreater(int(leds[near_indices].max()), 0)
+        self.assertEqual(int(leds[far_indices].max()), 0)
+        self.assertEqual(renderer.last_spatial_priority_band_skips, 1)
+
     def test_tv_role_sampling_uses_explicit_side(self) -> None:
         spatial = spatial_config()
         spatial["strips"] = [
@@ -329,6 +344,31 @@ class SpatialRuntimeTests(unittest.TestCase):
         extension_start, extension_end = topology.strip_ranges["ceiling-front"]
         self.assertGreater(int(leds[parent_start:parent_end, 0].max()), 240)
         self.assertGreater(int(leds[extension_start:extension_end, 0].max()), 110)
+
+    def test_tv_image_blur_softens_tv_sync_output(self) -> None:
+        spatial = spatial_config()
+        spatial["strips"] = [
+            dict(
+                spatial["strips"][0],
+                id="tv-top",
+                tv_role="top",
+                sync_mode="tv_image",
+                led_count=5,
+                device_start=0,
+            )
+        ]
+        frame = np.zeros((9, 9, 3), dtype=np.uint8)
+        frame[0, 4, 2] = 255
+        sharp_config = EngineConfig(total_leds=5, spatial=spatial, brightness=1.0, gamma=1.0, color_smoothing=0.0, tv_image_blur=0)
+        blur_config = EngineConfig(total_leds=5, spatial=spatial, brightness=1.0, gamma=1.0, color_smoothing=0.0, tv_image_blur=7)
+        sharp = VectorizedSpatialRenderer(sharp_config, SpatialRoomTopology(sharp_config))
+        blurred = VectorizedSpatialRenderer(blur_config, SpatialRoomTopology(blur_config))
+        sharp.set_tv_frame(frame)
+        blurred.set_tv_frame(frame)
+        sharp_leds = sharp.step(0.1)
+        blurred_leds = blurred.step(0.1)
+        self.assertGreater(int(sharp_leds[:, 0].max()), int(blurred_leds[:, 0].max()))
+        self.assertGreater(int(np.count_nonzero(blurred_leds[:, 0])), int(np.count_nonzero(sharp_leds[:, 0])))
 
     def test_tv_image_extension_samples_parent_side_independently(self) -> None:
         spatial = spatial_config()

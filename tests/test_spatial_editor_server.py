@@ -198,6 +198,7 @@ class EditorServerCase(unittest.TestCase):
                 "enabled_effects": {"shockwave": False, "ambient_side_spill": False},
                 "effect_sensitivity": {"shockwave": 0.85},
                 "front_ambient_coverage": 0.35,
+                "tv_image_blur": 11,
                 "ambient_side_spill_base_intensity": 0.25,
                 "ambient_side_spill_boost_intensity": 1.6,
             },
@@ -207,12 +208,14 @@ class EditorServerCase(unittest.TestCase):
         self.assertFalse(payload["enabled_effects"]["ambient_side_spill"])
         self.assertEqual(payload["effect_sensitivity"]["shockwave"], 0.85)
         self.assertEqual(payload["front_ambient_coverage"], 0.35)
+        self.assertEqual(payload["tv_image_blur"], 11)
         self.assertEqual(payload["ambient_side_spill_base_intensity"], 0.25)
         self.assertEqual(payload["ambient_side_spill_boost_intensity"], 1.6)
         saved = json.loads(self.config_path.read_text(encoding="utf-8"))
         self.assertFalse(saved["enabled_effects"]["shockwave"])
         self.assertEqual(saved["effect_sensitivity"]["shockwave"], 0.85)
         self.assertEqual(saved["front_ambient_coverage"], 0.35)
+        self.assertEqual(saved["tv_image_blur"], 11)
         self.assertEqual(saved["ambient_side_spill_base_intensity"], 0.25)
         self.assertEqual(saved["ambient_side_spill_boost_intensity"], 1.6)
         runtime = SpatialEditorHandler.preview_manager.runtime
@@ -220,6 +223,7 @@ class EditorServerCase(unittest.TestCase):
         self.assertFalse(runtime.config.enabled_effects["shockwave"])
         self.assertEqual(runtime.config.effect_sensitivity["shockwave"], 0.85)
         self.assertEqual(runtime.config.front_ambient_coverage, 0.35)
+        self.assertEqual(runtime.config.tv_image_blur, 11)
         self.assertEqual(runtime.config.ambient_side_spill_base_intensity, 0.25)
         self.assertEqual(runtime.config.ambient_side_spill_boost_intensity, 1.6)
         status = self.get_json("/api/preview/status")
@@ -227,6 +231,7 @@ class EditorServerCase(unittest.TestCase):
         self.assertFalse(status["enabled_effects"]["shockwave"])
         self.assertEqual(status["effect_sensitivity"]["shockwave"], 0.85)
         self.assertEqual(status["front_ambient_coverage"], 0.35)
+        self.assertEqual(status["tv_image_blur"], 11)
         self.assertEqual(status["ambient_side_spill_base_intensity"], 0.25)
         self.assertEqual(status["ambient_side_spill_boost_intensity"], 1.6)
 
@@ -468,6 +473,9 @@ class EditorServerCase(unittest.TestCase):
         self.assertIn(b"effect_sensitivity", app)
         self.assertIn(b"ambient_side_spill_base_intensity", app)
         self.assertIn(b"ambient_side_spill_boost_intensity", app)
+        self.assertIn(b"tv_image_blur", app)
+        self.assertIn(b'id="tv-image-blur"', index)
+        self.assertIn(b"TV image blur", index)
         self.assertIn(b"TRIGGER_EFFECTS", app)
         self.assertIn(b"/api/preview/trigger", app)
         self.assertIn(b"pendingEffectOverrides", app)
@@ -480,8 +488,10 @@ class EditorServerCase(unittest.TestCase):
         self.assertIn(b"Primary:", app)
         self.assertIn(b"Ambient side spill", app)
         self.assertIn(b"leds_flat", app)
-        self.assertIn(b"LED rev", app)
-        self.assertIn(b"Frame rev", app)
+        self.assertNotIn(b"LED rev", app)
+        self.assertNotIn(b"Frame rev", app)
+        self.assertIn(b"View render", app)
+        self.assertIn(b"PREVIEW_MAX_FPS = 90", app)
         self.assertIn(b"Max LED", app)
         self.assertIn(b"mirrorHorizontal", app)
         self.assertIn(b"drawViewHud", app)

@@ -1,5 +1,8 @@
 import { createLightPreview3d } from "./scene3d.js?v=three165-live10";
 
+const PREVIEW_MAX_FPS = 90;
+const PREVIEW_POLL_INTERVAL_MS = Math.max(1, Math.round(1000 / PREVIEW_MAX_FPS));
+
 const statusEl = document.querySelector("#status");
 const canvas = document.querySelector("#scene");
 const ctx = canvas.getContext("2d");
@@ -39,6 +42,7 @@ let effectSaveAgain = false;
 let pendingEffectOverrides = {};
 let pendingSensitivityOverrides = {};
 let pendingAmbientSpillSettings = {};
+let previewRenderStats = { avgMs: 0, samples: 0, maxFps: PREVIEW_MAX_FPS };
 
 const EFFECT_LABELS = {
   front_ambient: "Front ambient",
@@ -96,12 +100,22 @@ const fields = {
   startSimulation: document.querySelector("#start-simulation"),
   stopSimulation: document.querySelector("#stop-simulation"),
   previewStatus: document.querySelector("#preview-status"),
+  targetFps: document.querySelector("#target-fps"),
+  wledFps: document.querySelector("#wled-fps"),
+  renderMode: document.querySelector("#render-mode"),
+  edgeBandWidth: document.querySelector("#edge-band-width"),
+  edgeBandHeight: document.querySelector("#edge-band-height"),
+  edgeBandFraction: document.querySelector("#edge-band-fraction"),
+  hybridFullWidth: document.querySelector("#hybrid-full-width"),
+  hybridFullHeight: document.querySelector("#hybrid-full-height"),
   effectToggles: document.querySelector("#effect-toggles"),
   effectSensitivity: document.querySelector("#effect-sensitivity"),
   ambientSideSpillBase: document.querySelector("#ambient-side-spill-base-intensity"),
   ambientSideSpillBaseValue: document.querySelector("#ambient-side-spill-base-value"),
   ambientSideSpillBoost: document.querySelector("#ambient-side-spill-boost-intensity"),
   ambientSideSpillBoostValue: document.querySelector("#ambient-side-spill-boost-value"),
+  tvImageBlur: document.querySelector("#tv-image-blur"),
+  tvImageBlurValue: document.querySelector("#tv-image-blur-value"),
   effectPatterns: document.querySelector("#effect-patterns"),
   stopPattern: document.querySelector("#stop-pattern"),
   triggeredEffects: document.querySelector("#triggered-effects"),
@@ -143,7 +157,13 @@ const fields = {
   save: document.querySelector("#save"),
 };
 
-const lightPreview3d = createLightPreview3d({ canvas: canvas3d, fallback: webglFallback });
+const lightPreview3d = createLightPreview3d({
+  canvas: canvas3d,
+  fallback: webglFallback,
+  onRenderStats(stats) {
+    previewRenderStats = stats;
+  },
+});
 
 async function loadConfig() {
   statusEl.textContent = "Loading config";
@@ -252,19 +272,23 @@ function syncEffectSensitivityControls() {
 }
 
 function syncAmbientSpillControls() {
-  if (!config || !fields.ambientSideSpillBase || !fields.ambientSideSpillBoost) return;
+  if (!config || !fields.ambientSideSpillBase || !fields.ambientSideSpillBoost || !fields.tvImageBlur) return;
   const base = Number(config.ambient_side_spill_base_intensity ?? 0.45);
   const boost = Number(config.ambient_side_spill_boost_intensity ?? 1.0);
+  const blur = Math.max(0, Math.round(Number(config.tv_image_blur ?? 0)));
   fields.ambientSideSpillBase.value = String(base);
   fields.ambientSideSpillBoost.value = String(boost);
+  fields.tvImageBlur.value = String(blur);
   fields.ambientSideSpillBase.disabled = effectSaveInFlight;
   fields.ambientSideSpillBoost.disabled = effectSaveInFlight;
+  fields.tvImageBlur.disabled = effectSaveInFlight;
   fields.ambientSideSpillBaseValue.textContent = base.toFixed(2);
   fields.ambientSideSpillBoostValue.textContent = boost.toFixed(2);
+  fields.tvImageBlurValue.textContent = String(blur);
 }
 
 function bindAmbientSpillControls() {
-  if (!fields.ambientSideSpillBase || !fields.ambientSideSpillBoost) return;
+  if (!fields.ambientSideSpillBase || !fields.ambientSideSpillBoost || !fields.tvImageBlur) return;
   fields.ambientSideSpillBase.addEventListener("input", () => {
     const next = Number(fields.ambientSideSpillBase.value);
     config.ambient_side_spill_base_intensity = next;
@@ -277,6 +301,13 @@ function bindAmbientSpillControls() {
     config.ambient_side_spill_boost_intensity = next;
     pendingAmbientSpillSettings.ambient_side_spill_boost_intensity = next;
     fields.ambientSideSpillBoostValue.textContent = next.toFixed(2);
+    scheduleEffectSave();
+  });
+  fields.tvImageBlur.addEventListener("input", () => {
+    const next = Math.max(0, Math.round(Number(fields.tvImageBlur.value)));
+    config.tv_image_blur = next;
+    pendingAmbientSpillSettings.tv_image_blur = next;
+    fields.tvImageBlurValue.textContent = String(next);
     scheduleEffectSave();
   });
 }
@@ -316,7 +347,7 @@ async function triggerPreviewPattern(effect) {
   loopingEffect = payload.looping_effect || "";
   renderEffectPatterns();
   fields.previewStatus.textContent = loopingEffect ? `Looping pattern: ${effectLabel(loopingEffect)}` : "Pattern stopped";
-  schedulePreviewPoll(40);
+  schedulePreviewPoll(PREVIEW_POLL_INTERVAL_MS);
 }
 
 function scheduleEffectSave() {
@@ -360,6 +391,7 @@ async function saveEffectToggles() {
   config.effect_sensitivity = payload.effect_sensitivity || config.effect_sensitivity;
   config.ambient_side_spill_base_intensity = payload.ambient_side_spill_base_intensity ?? config.ambient_side_spill_base_intensity;
   config.ambient_side_spill_boost_intensity = payload.ambient_side_spill_boost_intensity ?? config.ambient_side_spill_boost_intensity;
+  config.tv_image_blur = payload.tv_image_blur ?? config.tv_image_blur;
   syncEffectToggleControls();
   syncAmbientSpillControls();
   statusEl.textContent = "Effects updated";
@@ -447,6 +479,7 @@ function bindForm() {
   fields.tvV.value = spatial.tv.center_v;
   fields.tvWidth.value = spatial.tv.width;
   fields.tvHeight.value = spatial.tv.height;
+  bindRenderPerformance();
   refreshEditorState();
 }
 
@@ -460,6 +493,29 @@ function readRoomTvForm() {
   spatial.tv.center_v = number(fields.tvV.value, 1.25);
   spatial.tv.width = number(fields.tvWidth.value, 1.4);
   spatial.tv.height = number(fields.tvHeight.value, 0.8);
+}
+
+function bindRenderPerformance() {
+  if (!config) return;
+  fields.targetFps.value = config.target_fps ?? 90;
+  fields.wledFps.value = config.wled_fps ?? 90;
+  fields.renderMode.value = config.render_mode || "full_frame";
+  fields.edgeBandWidth.value = config.edge_band_width ?? 192;
+  fields.edgeBandHeight.value = config.edge_band_height ?? 108;
+  fields.edgeBandFraction.value = config.edge_band_fraction ?? 0.12;
+  fields.hybridFullWidth.value = config.hybrid_full_width ?? 64;
+  fields.hybridFullHeight.value = config.hybrid_full_height ?? 36;
+}
+
+function readRenderPerformanceForm() {
+  config.render_mode = fields.renderMode.value || "full_frame";
+  config.target_fps = Math.max(1, Math.min(90, Math.round(number(fields.targetFps.value, config.target_fps ?? 90))));
+  config.wled_fps = Math.max(1, Math.min(90, Math.round(number(fields.wledFps.value, config.wled_fps ?? 90))));
+  config.edge_band_width = Math.max(8, Math.round(number(fields.edgeBandWidth.value, config.edge_band_width ?? 192)));
+  config.edge_band_height = Math.max(8, Math.round(number(fields.edgeBandHeight.value, config.edge_band_height ?? 108)));
+  config.edge_band_fraction = Math.max(0.01, Math.min(0.5, number(fields.edgeBandFraction.value, config.edge_band_fraction ?? 0.12)));
+  config.hybrid_full_width = Math.max(8, Math.round(number(fields.hybridFullWidth.value, config.hybrid_full_width ?? 64)));
+  config.hybrid_full_height = Math.max(8, Math.round(number(fields.hybridFullHeight.value, config.hybrid_full_height ?? 36)));
 }
 
 function refreshEditorState({ syncDevicesJson = true, syncStripsJson = true, redraw = true } = {}) {
@@ -1271,6 +1327,7 @@ async function saveSpatialConfig({ silent = false } = {}) {
   }
   packDeviceRanges();
   refreshEditorState({ redraw: false });
+  readRenderPerformanceForm();
   saveInFlight = true;
   if (!silent) statusEl.textContent = "Saving";
   const response = await fetch("/api/config", {
@@ -1282,6 +1339,15 @@ async function saveSpatialConfig({ silent = false } = {}) {
       effect_sensitivity: { ...(config.effect_sensitivity || {}), ...pendingSensitivityOverrides },
       ambient_side_spill_base_intensity: pendingAmbientSpillSettings.ambient_side_spill_base_intensity ?? config.ambient_side_spill_base_intensity,
       ambient_side_spill_boost_intensity: pendingAmbientSpillSettings.ambient_side_spill_boost_intensity ?? config.ambient_side_spill_boost_intensity,
+      tv_image_blur: pendingAmbientSpillSettings.tv_image_blur ?? config.tv_image_blur,
+      target_fps: config.target_fps,
+      wled_fps: config.wled_fps,
+      render_mode: config.render_mode,
+      edge_band_width: config.edge_band_width,
+      edge_band_height: config.edge_band_height,
+      edge_band_fraction: config.edge_band_fraction,
+      hybrid_full_width: config.hybrid_full_width,
+      hybrid_full_height: config.hybrid_full_height,
     }),
   });
   const payload = await response.json();
@@ -1341,7 +1407,7 @@ async function startPreview() {
   const payload = await response.json();
   previewRunning = Boolean(payload.running);
   fields.previewStatus.textContent = previewRunning ? `Preview running (${payload.mode || "config"})` : `Preview failed: ${payload.error || "unknown error"}`;
-  if (previewRunning) schedulePreviewPoll(100);
+  if (previewRunning) schedulePreviewPoll(PREVIEW_POLL_INTERVAL_MS);
 }
 
 async function startSimulation() {
@@ -1355,7 +1421,7 @@ async function startSimulation() {
   const payload = await response.json();
   previewRunning = Boolean(payload.running);
   fields.previewStatus.textContent = previewRunning ? "Simulation preview running" : `Simulation failed: ${payload.error || "unknown error"}`;
-  if (previewRunning) schedulePreviewPoll(60);
+  if (previewRunning) schedulePreviewPoll(PREVIEW_POLL_INTERVAL_MS);
 }
 
 async function stopPreview(path = "/api/preview/stop") {
@@ -1385,7 +1451,7 @@ async function stopSimulation() {
 
 function schedulePreviewPoll(delay = 160) {
   if (previewTimer) clearTimeout(previewTimer);
-  previewTimer = setTimeout(pollPreviewStatus, delay);
+  previewTimer = setTimeout(pollPreviewStatus, Math.max(PREVIEW_POLL_INTERVAL_MS, delay));
 }
 
 function unpackLedColors(flat, count) {
@@ -1449,12 +1515,12 @@ async function pollPreviewStatus() {
       ? "Waiting for frames"
       : (payload.hyperhdr_connected ? "HyperHDR connected" : "HyperHDR reconnecting");
     fields.previewStatus.textContent = previewRunning
-      ? `${mode} preview running | ${source} | FPS ${Number(payload.fps || 0).toFixed(1)} | LED rev ${Number(payload.led_revision || 0)} | Frame rev ${Number(payload.frame_revision || 0)} | Lit ${Number(payload.lit_led_count || 0)}/${Number(payload.led_count || 0)} | Max LED ${Number(payload.led_max || 0)} | Waves ${payload.active_waves || 0}`
+      ? `${mode} preview running | ${source} | FPS ${Number(payload.fps || 0).toFixed(1)} | View render ${Number(previewRenderStats.avgMs || 0).toFixed(2)}ms avg/${Number(previewRenderStats.samples || 0)} | Lit ${Number(payload.lit_led_count || 0)}/${Number(payload.led_count || 0)} | Max LED ${Number(payload.led_max || 0)} | Waves ${payload.active_waves || 0}`
       : "Preview stopped";
   } catch (error) {
     fields.previewStatus.textContent = `Preview error: ${error}`;
   }
-  if (previewRunning) schedulePreviewPoll(160);
+  if (previewRunning) schedulePreviewPoll(PREVIEW_POLL_INTERVAL_MS);
 }
 
 function addStrip() {
@@ -1549,6 +1615,21 @@ fields.startSimulation.addEventListener("click", startSimulation);
 fields.stopSimulation.addEventListener("click", stopSimulation);
 fields.stopPattern.addEventListener("click", () => triggerPreviewPattern("idle"));
 bindAmbientSpillControls();
+for (const input of [
+  fields.renderMode,
+  fields.targetFps,
+  fields.wledFps,
+  fields.edgeBandWidth,
+  fields.edgeBandHeight,
+  fields.edgeBandFraction,
+  fields.hybridFullWidth,
+  fields.hybridFullHeight,
+]) {
+  input.addEventListener("change", () => {
+    readRenderPerformanceForm();
+    markDirty();
+  });
+}
 fields.view2d.addEventListener("click", () => setViewMode("2d"));
 fields.view3d.addEventListener("click", () => setViewMode("3d"));
 window.addEventListener("resize", () => {

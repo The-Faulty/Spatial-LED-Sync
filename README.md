@@ -165,7 +165,11 @@ Color velocity modifies each wave after detection. Fast color changes increase w
 
 - Lower `analysis_width` and `analysis_height` for Raspberry Pi targets.
 - Use `frame_difference` if optical flow is too expensive.
-- Keep `target_fps` and `wled_fps` near 25-30 for smooth output without flooding WLED.
+- `target_fps` and `wled_fps` can run up to 90 for low-latency preview/output; reduce them on Pi targets if rendering or WLED cannot keep up.
+- Use `motion_analysis_fps` to run motion/event detection slower than LED rendering. Live/headless runtime defaults to `parallel_runtime: true`, so rendering and WLED output continue while analysis works on the latest frame.
+- Use `render_mode` to trade analysis quality for CPU. `full_frame` preserves current behavior, `edge_effects` analyzes compact edge bands, and `hybrid_edge_full` samples TV strips from edge bands while detecting effects on a tiny full-frame image.
+- Direct `tv_image` and `blend` strips use the freshest prepared frame in the render loop. Under load, spatial effects degrade before TV sync, prioritizing LEDs closest to the configured TV center before far side/rear LEDs.
+- Keep `analysis_queue_size` and `event_queue_size` small. The default latest-wins queues drop stale analysis work instead of delaying LED output.
 - Limit `max_active_waves` to bound CPU cost.
 - Run with `--no-debug` for live deployments.
 - Disabled effects reduce analysis work. Ambient/bloom-only modes skip optical flow, flash/pulse-only modes use frame differencing without edge flow, and fully disabled event effects skip motion/event analysis while TV-image sync still works.

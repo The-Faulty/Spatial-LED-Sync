@@ -35,6 +35,24 @@
         </fieldset>
 
         <fieldset>
+          <legend>Render Performance</legend>
+          <label>Target FPS <input id="target-fps" type="number" min="1" max="90" step="1" /></label>
+          <label>WLED FPS <input id="wled-fps" type="number" min="1" max="90" step="1" /></label>
+          <label>Mode
+            <select id="render-mode">
+              <option value="full_frame">full_frame</option>
+              <option value="edge_effects">edge_effects</option>
+              <option value="hybrid_edge_full">hybrid_edge_full</option>
+            </select>
+          </label>
+          <label>Edge Width <input id="edge-band-width" type="number" min="8" step="1" /></label>
+          <label>Edge Height <input id="edge-band-height" type="number" min="8" step="1" /></label>
+          <label>Edge Fraction <input id="edge-band-fraction" type="number" min="0.01" max="0.5" step="0.01" /></label>
+          <label>Hybrid Width <input id="hybrid-full-width" type="number" min="8" step="1" /></label>
+          <label>Hybrid Height <input id="hybrid-full-height" type="number" min="8" step="1" /></label>
+        </fieldset>
+
+        <fieldset>
           <legend>Effects</legend>
           <details class="effect-panel" open>
             <summary>Effect toggles</summary>
@@ -56,6 +74,11 @@
                 <span>Boost intensity</span>
                 <input id="ambient-side-spill-boost-intensity" type="range" min="0" max="2" step="0.05" />
                 <span id="ambient-side-spill-boost-value" class="effect-sensitivity-value">1.00</span>
+              </label>
+              <label class="effect-sensitivity-row">
+                <span>TV image blur</span>
+                <input id="tv-image-blur" type="range" min="0" max="31" step="1" />
+                <span id="tv-image-blur-value" class="effect-sensitivity-value">0</span>
               </label>
             </div>
           </details>

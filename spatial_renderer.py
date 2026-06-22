@@ -34,6 +34,9 @@ class SpatialRenderer(Protocol):
     def front_ambient_led_count(self) -> int:
         ...
 
+    def set_spatial_priority_budget(self, max_bands: int | None) -> None:
+        ...
+
     def step(self, dt: float) -> np.ndarray:
         ...
 
@@ -81,6 +84,9 @@ class VectorizedSpatialRenderer:
         self._room_diagonal = topology.room_diagonal()
         centered = self._spatial_positions - self._room_center.reshape(1, 3)
         self._spatial_angles = np.arctan2(centered[:, 2], centered[:, 0]) if centered.size else np.zeros(0, dtype=np.float32)
+        self._spatial_priority_bands = self._build_spatial_priority_bands()
+        self._spatial_priority_budget: int | None = None
+        self.last_spatial_priority_band_skips = 0
 
     def add_events(self, events: list[LightEvent]) -> None:
         diagonal = max(0.1, self.topology.room_diagonal())
@@ -184,6 +190,12 @@ class VectorizedSpatialRenderer:
     def front_ambient_led_count(self) -> int:
         return max(1, int(self.topology.front_ambient_indices().size))
 
+    def set_spatial_priority_budget(self, max_bands: int | None) -> None:
+        if max_bands is None:
+            self._spatial_priority_budget = None
+        else:
+            self._spatial_priority_budget = max(1, min(int(max_bands), len(self._spatial_priority_bands)))
+
     def step(self, dt: float) -> np.ndarray:
         leds = self._working_leds
         leds.fill(0.0)
@@ -201,8 +213,10 @@ class VectorizedSpatialRenderer:
         if self.topology.total == 0 or self._spatial_indices.size == 0:
             return
         active: list[SpatialLightWave] = []
-        positions = self._spatial_positions
-        spatial_idx = self._spatial_indices
+        spatial_idx, positions, angles, skipped = self._priority_render_selection()
+        self.last_spatial_priority_band_skips = skipped
+        if spatial_idx.size == 0:
+            return
         for wave in self.waves:
             wave.age += dt
             wave.intensity *= wave.decay_rate ** (dt * 30.0)
@@ -248,7 +262,6 @@ class VectorizedSpatialRenderer:
                 envelope = np.exp(-distances_sq / (2.0 * max(wave.spread * 5.0, 0.1) ** 2)) * ripple
             elif wave.kind == "portal_vortex":
                 distances = np.sqrt(distances_sq)
-                angles = self._spatial_angles
                 spiral = 0.5 + 0.5 * np.sin(angles * 3.0 * max(1, wave.direction_hint) + distances * 4.0 - wave.age * 6.0)
                 envelope = np.exp(-((distances - travelled * 0.45) ** 2) / (2.0 * (wave.spread * 2.5) ** 2)) * spiral
             elif wave.kind in {"color_bloom", "lightning", "ember_particles"}:
@@ -266,6 +279,30 @@ class VectorizedSpatialRenderer:
             else:
                 leds[spatial_idx] += envelope.reshape(-1, 1) * contribution
         self.waves = active
+
+    def _build_spatial_priority_bands(self) -> list[np.ndarray]:
+        if self._spatial_indices.size == 0:
+            return []
+        tv = self.topology.spatial.tv
+        tv_center = self.topology.wall_point(tv.wall, tv.center_u, tv.center_v).reshape(1, 3)
+        distances = np.linalg.norm(self._spatial_positions - tv_center, axis=1)
+        ordered_local = np.argsort(distances).astype(np.int32)
+        band_count = max(1, int(self.config.spatial_priority_bands))
+        return [band.astype(np.int32) for band in np.array_split(ordered_local, band_count) if band.size]
+
+    def _priority_render_selection(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+        if not self._spatial_priority_bands:
+            return self._spatial_indices, self._spatial_positions, self._spatial_angles, 0
+        max_bands = self._spatial_priority_budget or len(self._spatial_priority_bands)
+        max_bands = max(1, min(max_bands, len(self._spatial_priority_bands)))
+        selected_local = np.concatenate(self._spatial_priority_bands[:max_bands])
+        skipped = max(0, len(self._spatial_priority_bands) - max_bands)
+        return (
+            self._spatial_indices[selected_local],
+            self._spatial_positions[selected_local],
+            self._spatial_angles[selected_local],
+            skipped,
+        )
 
     def _render_front_ambient(self, leds: np.ndarray, dt: float) -> None:
         if self.front_ambient_intensity <= self.config.wave_min_intensity:
@@ -349,11 +386,31 @@ class VectorizedSpatialRenderer:
     def _apply_tv_sync(self, leds: np.ndarray) -> None:
         if not np.any(self._tv_mask):
             return
-        tv_colors = self.topology.tv_sample_colors(self.tv_frame)
+        tv_colors = self.topology.tv_sample_colors(self._tv_sample_frame())
         tv_only = np.array([mode == "tv_image" for mode in self.topology.sync_modes], dtype=bool)
         blend = np.array([mode == "blend" for mode in self.topology.sync_modes], dtype=bool)
         leds[tv_only] = tv_colors[tv_only]
         leds[blend] = leds[blend] * (1.0 - self._blend[blend]) + tv_colors[blend] * self._blend[blend]
+
+    def _tv_sample_frame(self) -> np.ndarray | None:
+        if self.tv_frame is None:
+            return None
+        blur = int(max(0, getattr(self.config, "tv_image_blur", 0)))
+        if blur <= 0 or min(self.tv_frame.shape[:2]) < 3:
+            return self.tv_frame
+        kernel = max(3, blur)
+        if kernel % 2 == 0:
+            kernel += 1
+        min_dim = min(self.tv_frame.shape[0], self.tv_frame.shape[1])
+        max_kernel = min_dim if min_dim % 2 == 1 else min_dim - 1
+        max_kernel = max(3, max_kernel)
+        kernel = min(kernel, max_kernel)
+        try:
+            return cv2.GaussianBlur(self.tv_frame, (kernel, kernel), 0)
+        except cv2.error:
+            blur_w = max(1, min(kernel, self.tv_frame.shape[1]))
+            blur_h = max(1, min(kernel, self.tv_frame.shape[0]))
+            return cv2.blur(self.tv_frame, (blur_w, blur_h))
 
     def _radius_limit(self, intensity: float, kind: str) -> float:
         diagonal = max(0.1, self.topology.room_diagonal())

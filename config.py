@@ -89,12 +89,22 @@ class EngineConfig:
     tv_left_boundary: int = 95
     tv_right_boundary: int = 125
 
-    target_fps: int = 30
+    target_fps: int = 90
     motion_analysis_fps: int = 15
-    wled_fps: int = 25
+    wled_fps: int = 90
+    parallel_runtime: bool = True
+    tv_frame_queue_size: int = 1
+    analysis_queue_size: int = 1
+    event_queue_size: int = 2
     frame_buffer_size: int = 4
     analysis_width: int = 192
     analysis_height: int = 108
+    render_mode: str = "full_frame"
+    edge_band_width: int = 192
+    edge_band_height: int = 108
+    edge_band_fraction: float = 0.12
+    hybrid_full_width: int = 64
+    hybrid_full_height: int = 36
     max_active_waves: int = 50
 
     normal_spill_radius: int = 20
@@ -110,6 +120,7 @@ class EngineConfig:
     front_ambient_source: str = "top_strip"
     front_ambient_top_height: float = 0.12
     front_ambient_blur: int = 5
+    tv_image_blur: int = 0
     ambient_side_spill_base_intensity: float = 0.45
     ambient_side_spill_boost_intensity: float = 1.0
     enabled_effects: dict[str, bool] = field(default_factory=lambda: dict(DEFAULT_ENABLED_EFFECTS))
@@ -154,6 +165,11 @@ class EngineConfig:
 
     runtime_profile: str = "desktop_dev"
     overload_policy: str = "adaptive_quality"
+    effect_render_skip_policy: str = "tv_first"
+    spatial_priority_bands: int = 3
+    spatial_near_budget_ratio: float = 1.0
+    spatial_mid_budget_ratio: float = 0.75
+    spatial_far_budget_ratio: float = 0.35
     spatial: dict[str, Any] = field(default_factory=lambda: default_spatial_dict(240))
 
     debug: bool = True
@@ -240,6 +256,20 @@ class EngineConfig:
             errors.append("motion_analysis_fps must be greater than 0")
         if self.wled_fps <= 0:
             errors.append("wled_fps must be greater than 0")
+        if self.tv_frame_queue_size <= 0:
+            errors.append("tv_frame_queue_size must be greater than 0")
+        if self.analysis_queue_size <= 0:
+            errors.append("analysis_queue_size must be greater than 0")
+        if self.event_queue_size <= 0:
+            errors.append("event_queue_size must be greater than 0")
+        if self.effect_render_skip_policy not in {"tv_first", "none"}:
+            errors.append("effect_render_skip_policy must be tv_first or none")
+        if self.spatial_priority_bands <= 0:
+            errors.append("spatial_priority_bands must be greater than 0")
+        for name in ("spatial_near_budget_ratio", "spatial_mid_budget_ratio", "spatial_far_budget_ratio"):
+            value = getattr(self, name)
+            if not 0.0 <= value <= 1.0:
+                errors.append(f"{name} must be between 0.0 and 1.0")
         if self.wled_protocol not in {"ddp", "json"}:
             errors.append("wled_protocol must be ddp or json")
         if not 1 <= self.wled_udp_port <= 65535:
@@ -250,6 +280,14 @@ class EngineConfig:
             errors.append("frame_buffer_size must be greater than 0")
         if self.analysis_width <= 0 or self.analysis_height <= 0:
             errors.append("analysis dimensions must be greater than 0")
+        if self.render_mode not in {"full_frame", "edge_effects", "hybrid_edge_full"}:
+            errors.append("render_mode must be full_frame, edge_effects, or hybrid_edge_full")
+        if self.edge_band_width <= 0 or self.edge_band_height <= 0:
+            errors.append("edge band dimensions must be greater than 0")
+        if self.hybrid_full_width <= 0 or self.hybrid_full_height <= 0:
+            errors.append("hybrid full-frame dimensions must be greater than 0")
+        if not 0.01 <= self.edge_band_fraction <= 0.5:
+            errors.append("edge_band_fraction must be between 0.01 and 0.5")
         if self.max_active_waves <= 0:
             errors.append("max_active_waves must be greater than 0")
 
@@ -269,6 +307,8 @@ class EngineConfig:
             errors.append("front_ambient_top_height must be between 0.02 and 0.50")
         if self.front_ambient_blur < 0:
             errors.append("front_ambient_blur must be zero or greater")
+        if self.tv_image_blur < 0:
+            errors.append("tv_image_blur must be zero or greater")
         if self.lighting_mode not in {"cinematic", "front_ambient"}:
             errors.append("lighting_mode must be cinematic or front_ambient")
         if not isinstance(self.enabled_effects, dict):

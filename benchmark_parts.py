@@ -47,8 +47,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile", choices=sorted(valid_runtime_profiles()), default="desktop_dev")
     parser.add_argument("--seconds", type=float, default=2.0, help="Seconds per benchmark case")
     parser.add_argument("--warmup", type=int, default=5, help="Warmup iterations per case")
+    parser.add_argument("--min-iterations", type=int, default=5, help="Minimum timed iterations per case")
     parser.add_argument("--led-count", type=int, default=240, help="LED count for renderer benchmarks")
     parser.add_argument("--mode", choices=["standard", "stress", "ceiling"], default="standard", help="Benchmark workload size")
+    parser.add_argument("--render-mode", choices=["full_frame", "edge_effects", "hybrid_edge_full"], default=None, help="Frame preparation render mode")
     parser.add_argument("--worst-case", action="store_true", help="Alias for --mode ceiling")
     parser.add_argument("--worst-led-count", type=int, default=2000, help="LED count for stress and ceiling modes")
     parser.add_argument("--max-waves", type=int, default=None, help="Override max active waves for renderer stress cases")
@@ -100,12 +102,13 @@ def make_config(path: str, profile: str, led_count: int) -> EngineConfig:
     return config
 
 
-def time_case(name: str, seconds: float, warmup: int, fn: Callable[[], object]) -> BenchResult:
+def time_case(name: str, seconds: float, warmup: int, min_iterations: int, fn: Callable[[], object]) -> BenchResult:
     for _ in range(max(0, warmup)):
         fn()
     samples: list[float] = []
     started = time.perf_counter()
-    while time.perf_counter() - started < seconds or not samples:
+    target_iterations = max(1, min_iterations)
+    while time.perf_counter() - started < seconds or len(samples) < target_iterations:
         before = time.perf_counter()
         fn()
         samples.append((time.perf_counter() - before) * 1000.0)
@@ -206,11 +209,17 @@ def reset_waves(renderer: object, waves: list[object]) -> None:
     setattr(renderer, "waves", [replace(wave) for wave in waves])
 
 
+def edge_only_mode(config: EngineConfig) -> bool:
+    return config.render_mode == "edge_effects"
+
+
 def build_cases(config: EngineConfig) -> list[tuple[str, Callable[[], object]]]:
     processor = FrameProcessor(config)
     raw = synthetic_frame(max(config.analysis_width * 2, 320), max(config.analysis_height * 2, 180))
-    prepared = processor.prepare(raw)
-    prepared_next = processor.prepare(synthetic_frame(raw.shape[1], raw.shape[0], 0.08))
+    render_frames = processor.prepare_render_frames(raw)
+    prepared = render_frames.analysis_frame
+    tv_frame = render_frames.tv_frame
+    prepared_next = processor.prepare_render_frames(synthetic_frame(raw.shape[1], raw.shape[0], 0.08)).analysis_frame
 
     color_motion = MotionDetector(config)
     color_motion.analyze(prepared, AnalysisRequirements(color_stats=True, frame_difference=False, edge_activity=False, top_corner_activity=False, optical_flow=False, retain_flow_debug=False))
@@ -218,10 +227,12 @@ def build_cases(config: EngineConfig) -> list[tuple[str, Callable[[], object]]]:
     diff_motion.analyze(prepared, AnalysisRequirements(color_stats=True, frame_difference=True, edge_activity=False, top_corner_activity=False, optical_flow=False, retain_flow_debug=False))
     edge_motion = MotionDetector(config)
     edge_motion.analyze(prepared, AnalysisRequirements(color_stats=True, frame_difference=True, edge_activity=True, top_corner_activity=True, optical_flow=False, retain_flow_debug=False))
-    flow_config = EngineConfig.from_dict(config.to_dict())
-    flow_config.motion_algorithm = "optical_flow"
-    flow_motion = MotionDetector(flow_config)
-    flow_motion.analyze(prepared, AnalysisRequirements(color_stats=True, frame_difference=True, edge_activity=True, top_corner_activity=True, optical_flow=True, retain_flow_debug=False))
+    flow_motion: MotionDetector | None = None
+    if not edge_only_mode(config):
+        flow_config = EngineConfig.from_dict(config.to_dict())
+        flow_config.motion_algorithm = "optical_flow"
+        flow_motion = MotionDetector(flow_config)
+        flow_motion.analyze(prepared, AnalysisRequirements(color_stats=True, frame_difference=True, edge_activity=True, top_corner_activity=True, optical_flow=True, retain_flow_debug=False))
 
     detector = EventDetector(config)
     mixer = EventMixer()
@@ -230,9 +241,9 @@ def build_cases(config: EngineConfig) -> list[tuple[str, Callable[[], object]]]:
 
     spatial_topology = SpatialRoomTopology(config)
     spatial_idle = create_effect_renderer(config, spatial_topology)
-    spatial_idle.set_tv_frame(prepared)
+    spatial_idle.set_tv_frame(tv_frame)
     spatial_active = create_effect_renderer(config, spatial_topology)
-    spatial_active.set_tv_frame(prepared)
+    spatial_active.set_tv_frame(tv_frame)
     spatial_active.add_events(events * 4)
     active_seed_waves = clone_waves(spatial_active)
 
@@ -248,14 +259,14 @@ def build_cases(config: EngineConfig) -> list[tuple[str, Callable[[], object]]]:
         reset_waves(renderer, active_seed_waves)
         return renderer_step(renderer)
 
-    return [
+    cases: list[tuple[str, Callable[[], object]]] = [
         ("frame.prepare", lambda: processor.prepare(raw)),
+        ("frame.prepare_render_frames", lambda: processor.prepare_render_frames(raw)),
         ("frame.top_strip_colors", lambda: processor.top_strip_colors(prepared, 120)),
         ("frame.color_stats", lambda: FrameProcessor.color_stats(prepared)),
         ("motion.color_only", lambda: color_motion.analyze(prepared_next, AnalysisRequirements(color_stats=True, frame_difference=False, edge_activity=False, top_corner_activity=False, optical_flow=False, retain_flow_debug=False))),
         ("motion.frame_difference", lambda: diff_motion.analyze(prepared_next, AnalysisRequirements(color_stats=True, frame_difference=True, edge_activity=False, top_corner_activity=False, optical_flow=False, retain_flow_debug=False))),
         ("motion.edge_activity", lambda: edge_motion.analyze(prepared_next, AnalysisRequirements(color_stats=True, frame_difference=True, edge_activity=True, top_corner_activity=True, optical_flow=False, retain_flow_debug=False))),
-        ("motion.optical_flow", lambda: flow_motion.analyze(prepared_next, AnalysisRequirements(color_stats=True, frame_difference=True, edge_activity=True, top_corner_activity=True, optical_flow=True, retain_flow_debug=False))),
         ("event.detect", lambda: detector.detect(analysis)),
         ("event.mix", lambda: mixer.mix(events)),
         ("renderer.spatial_idle", lambda: renderer_step(spatial_idle)),
@@ -263,6 +274,9 @@ def build_cases(config: EngineConfig) -> list[tuple[str, Callable[[], object]]]:
         ("wled.disabled_send", lambda: wled.send(leds)),
         ("wled.ddp_payload", wled_ddp_payload),
     ]
+    if flow_motion is not None:
+        cases.insert(7, ("motion.optical_flow", lambda: flow_motion.analyze(prepared_next, AnalysisRequirements(color_stats=True, frame_difference=True, edge_activity=True, top_corner_activity=True, optical_flow=True, retain_flow_debug=False))))
+    return cases
 
 
 def build_worst_cases(config: EngineConfig, wave_count: int, prefix: str) -> list[tuple[str, Callable[[], object]]]:
@@ -270,19 +284,23 @@ def build_worst_cases(config: EngineConfig, wave_count: int, prefix: str) -> lis
     processor = FrameProcessor(config)
     raw_a = complex_frame(max(config.analysis_width * 3, 640), max(config.analysis_height * 3, 360), 0.0)
     raw_b = complex_frame(raw_a.shape[1], raw_a.shape[0], 0.17)
-    prepared_a = processor.prepare(raw_a)
-    prepared_b = processor.prepare(raw_b)
+    render_a = processor.prepare_render_frames(raw_a)
+    render_b = processor.prepare_render_frames(raw_b)
+    prepared_a = render_a.analysis_frame
+    prepared_b = render_b.analysis_frame
+    tv_b = render_b.tv_frame
 
+    use_optical_flow = not edge_only_mode(config)
     requirements = AnalysisRequirements(
         color_stats=True,
         frame_difference=True,
         edge_activity=True,
         top_corner_activity=True,
-        optical_flow=True,
-        retain_flow_debug=True,
+        optical_flow=use_optical_flow,
+        retain_flow_debug=use_optical_flow,
     )
     flow_config = EngineConfig.from_dict(config.to_dict())
-    flow_config.motion_algorithm = "optical_flow"
+    flow_config.motion_algorithm = "optical_flow" if use_optical_flow else "frame_difference"
     complex_motion = MotionDetector(flow_config)
     complex_motion.analyze(prepared_a, requirements)
 
@@ -298,14 +316,14 @@ def build_worst_cases(config: EngineConfig, wave_count: int, prefix: str) -> lis
 
     spatial_topology = SpatialRoomTopology(config)
     spatial_max = create_effect_renderer(config, spatial_topology)
-    spatial_max.set_tv_frame(prepared_b)
+    spatial_max.set_tv_frame(tv_b)
 
     repeats = max(1, (config.max_active_waves // max(1, len(heavy_events))) + 1)
     seed_events = (heavy_events * repeats)[: config.max_active_waves]
     spatial_max.add_events(seed_events)
     max_seed_waves = clone_waves(spatial_max)
     pipeline_renderer = create_effect_renderer(config, spatial_topology)
-    pipeline_renderer.set_tv_frame(prepared_b)
+    pipeline_renderer.set_tv_frame(tv_b)
 
     payload_leds = np.arange(config.total_leds * 3, dtype=np.uint8).reshape(config.total_leds, 3)
     wled = WLEDOutput(config, logging.getLogger("benchmark"), spatial_topology)
@@ -316,32 +334,32 @@ def build_worst_cases(config: EngineConfig, wave_count: int, prefix: str) -> lis
         return renderer_step(renderer)
 
     def prepare_analyze_detect_mix() -> object:
-        frame = processor.prepare(raw_b)
-        analysis = complex_motion.analyze(frame, requirements)
+        frames = processor.prepare_render_frames(raw_b)
+        analysis = complex_motion.analyze(frames.analysis_frame, requirements)
         candidates = detector.detect(analysis)
         return mixer.mix(candidates)
 
     def render_after_detect() -> object:
         reset_waves(pipeline_renderer, max_seed_waves)
-        pipeline_renderer.set_tv_frame(prepared_b)
+        pipeline_renderer.set_tv_frame(tv_b)
         return pipeline_renderer.step(1.0 / 60.0)
 
     def full_frame_pipeline() -> object:
-        frame = processor.prepare(raw_b)
-        analysis = complex_motion.analyze(frame, requirements)
+        frames = processor.prepare_render_frames(raw_b)
+        analysis = complex_motion.analyze(frames.analysis_frame, requirements)
         candidates = detector.detect(analysis)
         mixed = mixer.mix(candidates)
         reset_waves(pipeline_renderer, max_seed_waves)
-        pipeline_renderer.set_tv_frame(frame)
+        pipeline_renderer.set_tv_frame(frames.tv_frame)
         pipeline_renderer.add_events(mixed)
         return pipeline_renderer.step(1.0 / 60.0)
 
     def wled_ddp_payload_2000() -> object:
         return wled._send_ddp(config.wled_ip or "192.0.2.1", payload_leds)
 
-    return [
+    cases: list[tuple[str, Callable[[], object]]] = [
         (f"{prefix}.frame.prepare_complex", lambda: processor.prepare(raw_b)),
-        (f"{prefix}.motion.full_optical_flow_debug", lambda: complex_motion.analyze(prepared_b, requirements)),
+        (f"{prefix}.frame.prepare_render_frames_complex", lambda: processor.prepare_render_frames(raw_b)),
         (f"{prefix}.event.detect_heavy_analysis", lambda: detector.detect(heavy_analysis)),
         (f"{prefix}.event.mix_many_candidates", lambda: mixer.mix(heavy_events * 8)),
         (f"{prefix}.renderer.spatial_{config.max_active_waves}_waves_2000_leds", lambda: refill(spatial_max)),
@@ -350,6 +368,9 @@ def build_worst_cases(config: EngineConfig, wave_count: int, prefix: str) -> lis
         (f"{prefix}.pipeline.render_after_detect", render_after_detect),
         (f"{prefix}.pipeline.total_with_render", full_frame_pipeline),
     ]
+    motion_name = f"{prefix}.motion.full_optical_flow_debug" if use_optical_flow else f"{prefix}.motion.edge_frame_difference"
+    cases.insert(2, (motion_name, lambda: complex_motion.analyze(prepared_b, requirements)))
+    return cases
 
 
 def main() -> int:
@@ -357,21 +378,24 @@ def main() -> int:
     mode = "ceiling" if args.worst_case else args.mode
     led_count = args.worst_led_count if mode in {"stress", "ceiling"} else args.led_count
     config = make_config(args.config, args.profile, led_count)
+    if args.render_mode is not None:
+        config.render_mode = args.render_mode
     if args.max_waves is not None:
         config.max_active_waves = max(1, int(args.max_waves))
     wave_override = args.wave_count if args.wave_count is not None else args.worst_waves
     if mode == "stress":
-        wave_count = int(wave_override if wave_override is not None else 100)
+        wave_count = int(wave_override if wave_override is not None else config.max_active_waves)
         cases = build_worst_cases(config, wave_count, "stress")
     elif mode == "ceiling":
         wave_count = int(wave_override if wave_override is not None else 2000)
         cases = build_worst_cases(config, wave_count, "ceiling")
     else:
         cases = build_cases(config)
-    results = [time_case(name, max(0.05, args.seconds), args.warmup, fn) for name, fn in cases]
+    results = [time_case(name, max(0.05, args.seconds), args.warmup, args.min_iterations, fn) for name, fn in cases]
     output = {
         "profile": config.runtime_profile,
         "mode": mode,
+        "render_mode": config.render_mode,
         "analysis_size": [config.analysis_width, config.analysis_height],
         "motion_analysis_fps": config.motion_analysis_fps,
         "led_count": config.total_leds,
@@ -385,7 +409,7 @@ def main() -> int:
     if args.json:
         print(json.dumps(output, indent=2))
     else:
-        print(f"Profile: {config.runtime_profile}  Mode: {mode}  LEDs: {config.total_leds}  60fps budget: {FRAME_BUDGET_MS_60FPS:.2f} ms")
+        print(f"Profile: {config.runtime_profile}  Mode: {mode}  Render: {config.render_mode}  LEDs: {config.total_leds}  60fps budget: {FRAME_BUDGET_MS_60FPS:.2f} ms")
         for result in results:
             status = "OK" if result.fits_60fps_budget else "OVER"
             print(

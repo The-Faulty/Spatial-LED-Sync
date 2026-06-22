@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import cv2
 import numpy as np
 
 from config import EngineConfig
+
+
+@dataclass
+class RenderFrames:
+    tv_frame: np.ndarray
+    analysis_frame: np.ndarray
+    preview_frame: np.ndarray
 
 
 class FrameProcessor:
@@ -13,15 +22,76 @@ class FrameProcessor:
     def prepare(self, frame: np.ndarray) -> np.ndarray:
         if frame is None or frame.size == 0:
             raise ValueError("empty frame")
-        if frame.ndim == 2:
-            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-        if frame.shape[2] == 4:
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+        frame = self._ensure_bgr(frame)
         return cv2.resize(
             frame,
             (self.config.analysis_width, self.config.analysis_height),
             interpolation=cv2.INTER_AREA,
         )
+
+    def prepare_render_frames(self, frame: np.ndarray) -> RenderFrames:
+        if frame is None or frame.size == 0:
+            raise ValueError("empty frame")
+        source = self._ensure_bgr(frame)
+        if self.config.render_mode == "edge_effects":
+            edge = self.edge_band_frame(source, self.config.analysis_width, self.config.analysis_height)
+            return RenderFrames(tv_frame=edge, analysis_frame=edge, preview_frame=edge)
+        if self.config.render_mode == "hybrid_edge_full":
+            edge = self.edge_band_frame(source, self.config.edge_band_width, self.config.edge_band_height)
+            full_low = cv2.resize(
+                source,
+                (self.config.hybrid_full_width, self.config.hybrid_full_height),
+                interpolation=cv2.INTER_AREA,
+            )
+            analysis = self._hybrid_analysis_frame(source, full_low)
+            return RenderFrames(tv_frame=edge, analysis_frame=analysis, preview_frame=analysis)
+        prepared = self.prepare(source)
+        return RenderFrames(tv_frame=prepared, analysis_frame=prepared, preview_frame=prepared)
+
+    def edge_band_frame(self, frame: np.ndarray, width: int, height: int) -> np.ndarray:
+        width = max(8, int(width))
+        height = max(8, int(height))
+        scaled = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+        band_y = max(1, min(height // 2, int(round(height * self.config.edge_band_fraction))))
+        band_x = max(1, min(width // 2, int(round(width * self.config.edge_band_fraction))))
+
+        top = scaled[:band_y, :]
+        bottom = scaled[height - band_y :, :]
+        left = scaled[:, :band_x]
+        right = scaled[:, width - band_x :]
+        edge_pixels = np.concatenate(
+            [top.reshape(-1, 3), bottom.reshape(-1, 3), left.reshape(-1, 3), right.reshape(-1, 3)],
+            axis=0,
+        )
+        fill = np.mean(edge_pixels, axis=0).astype(np.uint8) if edge_pixels.size else np.zeros(3, dtype=np.uint8)
+        output = np.empty_like(scaled)
+        output[:, :] = fill
+        output[:band_y, :] = top
+        output[height - band_y :, :] = bottom
+        output[:, :band_x] = left
+        output[:, width - band_x :] = right
+        return output
+
+    def _hybrid_analysis_frame(self, source: np.ndarray, full_low: np.ndarray) -> np.ndarray:
+        width = full_low.shape[1]
+        height = full_low.shape[0]
+        edge_low = self.edge_band_frame(source, width, height)
+        band_y = max(1, min(height // 2, int(round(height * self.config.edge_band_fraction))))
+        band_x = max(1, min(width // 2, int(round(width * self.config.edge_band_fraction))))
+        hybrid = full_low.copy()
+        hybrid[:band_y, :] = edge_low[:band_y, :]
+        hybrid[height - band_y :, :] = edge_low[height - band_y :, :]
+        hybrid[:, :band_x] = edge_low[:, :band_x]
+        hybrid[:, width - band_x :] = edge_low[:, width - band_x :]
+        return hybrid
+
+    @staticmethod
+    def _ensure_bgr(frame: np.ndarray) -> np.ndarray:
+        if frame.ndim == 2:
+            return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        if frame.shape[2] == 4:
+            return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+        return frame
 
     @staticmethod
     def zones(frame: np.ndarray) -> dict[str, np.ndarray]:

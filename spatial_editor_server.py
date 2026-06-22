@@ -124,6 +124,7 @@ class PreviewRuntimeManager:
             enabled_effects = dict(DEFAULT_ENABLED_EFFECTS)
             effect_sensitivity = dict(DEFAULT_EFFECT_SENSITIVITY)
             front_ambient_coverage = 1.0
+            tv_image_blur = 0
             ambient_side_spill_base_intensity = 0.45
             ambient_side_spill_boost_intensity = 1.0
             active_effect_counts: dict[str, int] = {}
@@ -132,6 +133,7 @@ class PreviewRuntimeManager:
                 enabled_effects.update(runtime.config.enabled_effects)
                 effect_sensitivity.update(runtime.config.effect_sensitivity)
                 front_ambient_coverage = runtime.config.front_ambient_coverage
+                tv_image_blur = runtime.config.tv_image_blur
                 ambient_side_spill_base_intensity = runtime.config.ambient_side_spill_base_intensity
                 ambient_side_spill_boost_intensity = runtime.config.ambient_side_spill_boost_intensity
                 renderer = runtime.wave_engine
@@ -145,6 +147,7 @@ class PreviewRuntimeManager:
                 enabled_effects.update(config.enabled_effects)
                 effect_sensitivity.update(config.effect_sensitivity)
                 front_ambient_coverage = config.front_ambient_coverage
+                tv_image_blur = config.tv_image_blur
                 ambient_side_spill_base_intensity = config.ambient_side_spill_base_intensity
                 ambient_side_spill_boost_intensity = config.ambient_side_spill_boost_intensity
             triggered = [
@@ -169,9 +172,14 @@ class PreviewRuntimeManager:
                 "triggered_effects": triggered,
                 "candidate_events": snapshot.candidate_events,
                 "wled_skip_count": snapshot.wled_skip_count,
+                "tv_frames": snapshot.tv_frames,
+                "analysis_frame_drops": snapshot.analysis_frame_drops,
+                "effect_frame_skips": snapshot.effect_frame_skips,
+                "spatial_priority_band_skips": snapshot.spatial_priority_band_skips,
                 "enabled_effects": enabled_effects,
                 "effect_sensitivity": effect_sensitivity,
                 "front_ambient_coverage": front_ambient_coverage,
+                "tv_image_blur": tv_image_blur,
                 "ambient_side_spill_base_intensity": ambient_side_spill_base_intensity,
                 "ambient_side_spill_boost_intensity": ambient_side_spill_boost_intensity,
                 "buffered_frames": snapshot.buffered_frames,
@@ -292,6 +300,34 @@ class SpatialEditorHandler(BaseHTTPRequestHandler):
                 except (TypeError, ValueError):
                     self._send_json({"ok": False, "errors": [f"{field} must be a number"]}, status=400)
                     return
+        if "tv_image_blur" in payload:
+            try:
+                config.tv_image_blur = int(payload["tv_image_blur"])
+            except (TypeError, ValueError):
+                self._send_json({"ok": False, "errors": ["tv_image_blur must be an integer"]}, status=400)
+                return
+        if "render_mode" in payload:
+            config.render_mode = str(payload["render_mode"])
+        for field in ("target_fps", "wled_fps"):
+            if field in payload:
+                try:
+                    setattr(config, field, int(payload[field]))
+                except (TypeError, ValueError):
+                    self._send_json({"ok": False, "errors": [f"{field} must be an integer"]}, status=400)
+                    return
+        for field in ("edge_band_width", "edge_band_height", "hybrid_full_width", "hybrid_full_height"):
+            if field in payload:
+                try:
+                    setattr(config, field, int(payload[field]))
+                except (TypeError, ValueError):
+                    self._send_json({"ok": False, "errors": [f"{field} must be an integer"]}, status=400)
+                    return
+        if "edge_band_fraction" in payload:
+            try:
+                config.edge_band_fraction = float(payload["edge_band_fraction"])
+            except (TypeError, ValueError):
+                self._send_json({"ok": False, "errors": ["edge_band_fraction must be a number"]}, status=400)
+                return
         errors = config.validate()
         if errors:
             self._send_json({"ok": False, "errors": errors}, status=400)
@@ -363,6 +399,12 @@ class SpatialEditorHandler(BaseHTTPRequestHandler):
                 except (TypeError, ValueError):
                     self._send_json({"ok": False, "errors": [f"{field} must be a number"]}, status=400)
                     return
+        if "tv_image_blur" in payload:
+            try:
+                config.tv_image_blur = int(payload["tv_image_blur"])
+            except (TypeError, ValueError):
+                self._send_json({"ok": False, "errors": ["tv_image_blur must be an integer"]}, status=400)
+                return
         errors = config.validate()
         if errors:
             self._send_json({"ok": False, "errors": errors}, status=400)
@@ -375,6 +417,7 @@ class SpatialEditorHandler(BaseHTTPRequestHandler):
                 "enabled_effects": config.enabled_effects,
                 "effect_sensitivity": config.effect_sensitivity,
                 "front_ambient_coverage": config.front_ambient_coverage,
+                "tv_image_blur": config.tv_image_blur,
                 "ambient_side_spill_base_intensity": config.ambient_side_spill_base_intensity,
                 "ambient_side_spill_boost_intensity": config.ambient_side_spill_boost_intensity,
             }
@@ -388,12 +431,14 @@ class SpatialEditorHandler(BaseHTTPRequestHandler):
             runtime.config.enabled_effects.update(config.enabled_effects)
             runtime.config.effect_sensitivity.update(config.effect_sensitivity)
             runtime.config.front_ambient_coverage = config.front_ambient_coverage
+            runtime.config.tv_image_blur = config.tv_image_blur
             runtime.config.ambient_side_spill_base_intensity = config.ambient_side_spill_base_intensity
             runtime.config.ambient_side_spill_boost_intensity = config.ambient_side_spill_boost_intensity
             if runtime.event_detector is not None:
                 runtime.event_detector.config.enabled_effects.update(config.enabled_effects)
                 runtime.event_detector.config.effect_sensitivity.update(config.effect_sensitivity)
                 runtime.event_detector.config.front_ambient_coverage = config.front_ambient_coverage
+                runtime.event_detector.config.tv_image_blur = config.tv_image_blur
                 runtime.event_detector.config.ambient_side_spill_base_intensity = config.ambient_side_spill_base_intensity
                 runtime.event_detector.config.ambient_side_spill_boost_intensity = config.ambient_side_spill_boost_intensity
             renderer = runtime.wave_engine
