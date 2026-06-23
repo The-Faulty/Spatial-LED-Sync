@@ -753,16 +753,23 @@ class GLESSpatialRenderer(VectorizedSpatialRenderer):
             raise RuntimeError("moderngl is not available for the GLES renderer") from exc
 
         context_errors: list[str] = []
-        for backend in ("egl", None):
+        context_attempts = (
+            ("egl", 200),
+            ("egl", 210),
+            ("egl", 330),
+            (None, 200),
+            (None, 330),
+        )
+        for backend, require in context_attempts:
             try:
                 if backend is None:
-                    self._ctx = moderngl.create_standalone_context()
+                    self._ctx = moderngl.create_standalone_context(require=require)
                 else:
-                    self._ctx = moderngl.create_standalone_context(backend=backend)
+                    self._ctx = moderngl.create_standalone_context(backend=backend, require=require)
                 break
             except Exception as exc:
                 label = "default" if backend is None else backend
-                context_errors.append(f"{label}: {type(exc).__name__}: {exc}")
+                context_errors.append(f"{label}/require={require}: {type(exc).__name__}: {exc}")
         if self._ctx is None:
             raise RuntimeError("standalone OpenGL context creation failed; " + "; ".join(context_errors))
 
