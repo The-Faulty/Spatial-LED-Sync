@@ -81,6 +81,8 @@ WAVE_KIND_CODES = {
     "negative_wave": 12,
 }
 
+SPATIAL_RENDERER_BACKEND_PROBE_VERSION = "gles-egl-require-0"
+
 
 def _wave_kind_code(kind: str) -> int:
     return WAVE_KIND_CODES.get(kind, 0)
@@ -776,7 +778,7 @@ class GLESSpatialRenderer(VectorizedSpatialRenderer):
                 label = "default" if backend is None else backend
                 context_errors.append(f"{label}/require={require}: {type(exc).__name__}: {exc}")
         if self._ctx is None:
-            raise RuntimeError("standalone OpenGL context creation failed; " + "; ".join(context_errors))
+            raise RuntimeError(f"standalone OpenGL context creation failed ({SPATIAL_RENDERER_BACKEND_PROBE_VERSION}); " + "; ".join(context_errors))
 
         total = max(1, int(self.topology.total))
         vertex_shader = """

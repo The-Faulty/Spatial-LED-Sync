@@ -511,6 +511,7 @@ def print_backend_comparison(comparison_rows: list[dict]) -> None:
 
 
 def probe_backends(config: EngineConfig) -> list[dict]:
+    import spatial_renderer
     from spatial_renderer import GLESSpatialRenderer, NumbaSpatialRenderer, VectorizedSpatialRenderer
 
     probes: list[dict] = []
@@ -528,6 +529,8 @@ def probe_backends(config: EngineConfig) -> list[dict]:
                 "actual_backend": getattr(renderer, "render_backend", "unknown"),
                 "status": getattr(renderer, "render_backend_status", "unknown"),
                 "error": "",
+                "module_path": getattr(spatial_renderer, "__file__", ""),
+                "probe_version": getattr(spatial_renderer, "SPATIAL_RENDERER_BACKEND_PROBE_VERSION", "unknown"),
             })
         except Exception as exc:
             probes.append({
@@ -536,6 +539,8 @@ def probe_backends(config: EngineConfig) -> list[dict]:
                 "actual_backend": "",
                 "status": "",
                 "error": f"{type(exc).__name__}: {exc}",
+                "module_path": getattr(spatial_renderer, "__file__", ""),
+                "probe_version": getattr(spatial_renderer, "SPATIAL_RENDERER_BACKEND_PROBE_VERSION", "unknown"),
             })
     return probes
 
@@ -546,6 +551,9 @@ def print_backend_probes(probes: list[dict]) -> None:
     for probe in probes:
         status = probe["status"] if probe["ok"] else probe["error"]
         print(f"{probe['backend']:10} {str(probe['ok']):>5} {probe['actual_backend']:>10}  {status}")
+    if probes:
+        print(f"Probe version: {probes[0].get('probe_version', 'unknown')}")
+        print(f"Renderer module: {probes[0].get('module_path', '')}")
 
 
 def main() -> int:
