@@ -9,7 +9,7 @@ import numpy as np
 from config import EngineConfig
 from event_detector import LightEvent
 from spatial_config import parse_spatial_config, spatial_config_to_dict, default_spatial_dict, validate_spatial_config
-from spatial_renderer import NumbaSpatialRenderer, VectorizedSpatialRenderer, create_spatial_renderer
+from spatial_renderer import CppSpatialRenderer, NumbaSpatialRenderer, SpatialLightWave, VectorizedSpatialRenderer, create_spatial_renderer
 from spatial_topology import SpatialRoomTopology
 from wled_output import WLEDOutput
 
@@ -143,12 +143,21 @@ class SpatialRuntimeTests(unittest.TestCase):
         self.assertEqual(getattr(renderer, "render_backend"), "numpy")
         self.assertEqual(leds.shape, (8, 3))
 
-    def test_spatial_renderer_factory_falls_back_when_forced_gles_fails(self) -> None:
-        config = EngineConfig(total_leds=8, spatial=spatial_config(), spatial_renderer_backend="gles")
-        with unittest.mock.patch("spatial_renderer.GLESSpatialRenderer", side_effect=RuntimeError("no context")):
+    def test_spatial_renderer_factory_falls_back_when_forced_cpp_fails(self) -> None:
+        config = EngineConfig(total_leds=8, spatial=spatial_config(), spatial_renderer_backend="cpp")
+        with unittest.mock.patch("spatial_renderer.CppSpatialRenderer", side_effect=RuntimeError("no native module")):
             renderer = create_spatial_renderer(config, SpatialRoomTopology(config))
         self.assertEqual(getattr(renderer, "render_backend"), "numpy")
         self.assertIn("fallback", getattr(renderer, "render_backend_status"))
+
+    def test_spatial_renderer_factory_uses_cpp_backend_when_available(self) -> None:
+        if not CppSpatialRenderer.available():
+            self.skipTest("native C++ renderer is not built")
+        config = EngineConfig(total_leds=8, spatial=spatial_config(), spatial_renderer_backend="cpp", brightness=1.0, color_smoothing=0.0)
+        renderer = create_spatial_renderer(config, SpatialRoomTopology(config))
+        self.assertEqual(getattr(renderer, "render_backend"), "cpp")
+        renderer.add_events([LightEvent(edge="top", intensity=1.0, color=(255, 80, 20), kind="explosion")])
+        self.assertEqual(renderer.step(0.1).shape, (8, 3))
 
     def test_numba_renderer_matches_numpy_for_fixed_scene_when_available(self) -> None:
         if not NumbaSpatialRenderer.available():
@@ -168,6 +177,145 @@ class SpatialRuntimeTests(unittest.TestCase):
         numpy_leds = numpy_renderer.step(0.05)
         numba_leds = numba_renderer.step(0.05)
         self.assertLessEqual(int(np.max(np.abs(numpy_leds.astype(np.int16) - numba_leds.astype(np.int16)))), 3)
+
+    def test_cpp_probe_matches_numpy_for_fixed_spatial_scene_when_available(self) -> None:
+        import cpp_probe
+
+        if not cpp_probe.available():
+            self.skipTest(f"cpp_probe is not built: {cpp_probe.unavailable_reason()}")
+        spatial = spatial_config()
+        for strip in spatial["strips"]:
+            strip["sync_mode"] = "spatial"
+        config = EngineConfig(total_leds=8, spatial=spatial, brightness=1.0, gamma=1.0, saturation=1.0, color_smoothing=0.0)
+        topology = SpatialRoomTopology(config)
+        renderer = VectorizedSpatialRenderer(config, topology)
+        events = [
+            LightEvent(edge="top", intensity=1.0, color=(255, 80, 20), kind="explosion"),
+            LightEvent(edge="left", intensity=0.8, color=(20, 180, 255), kind="shockwave"),
+            LightEvent(edge="right", intensity=0.7, color=(120, 40, 255), kind="portal_vortex"),
+            LightEvent(edge="top", intensity=0.6, color=(0, 0, 0), kind="negative_wave"),
+        ]
+        renderer.add_events(events)
+        seed = [replace(wave) for wave in renderer.waves]
+        inputs = cpp_probe.wave_probe_inputs(renderer, seed, 0.05)
+        cpp_leds = cpp_probe.full_probe(inputs, renderer)
+        renderer.waves = [replace(wave) for wave in seed]
+        numpy_leds = renderer.step(0.05)
+        self.assertEqual(cpp_leds.shape, numpy_leds.shape)
+        self.assertLessEqual(int(np.max(np.abs(numpy_leds.astype(np.int16) - cpp_leds.astype(np.int16)))), 4)
+
+    def test_cpp_renderer_matches_numpy_for_fixed_spatial_scene_when_available(self) -> None:
+        if not CppSpatialRenderer.available():
+            self.skipTest("native C++ renderer is not built")
+        spatial = spatial_config()
+        for strip in spatial["strips"]:
+            strip["sync_mode"] = "spatial"
+        config = EngineConfig(total_leds=8, spatial=spatial, brightness=1.0, gamma=1.0, saturation=1.0, color_smoothing=0.0)
+        topology = SpatialRoomTopology(config)
+        numpy_renderer = VectorizedSpatialRenderer(config, topology)
+        cpp_renderer = CppSpatialRenderer(config, topology)
+        events = [
+            LightEvent(edge="top", intensity=1.0, color=(255, 80, 20), kind="explosion"),
+            LightEvent(edge="left", intensity=0.8, color=(20, 180, 255), kind="shockwave"),
+            LightEvent(edge="right", intensity=0.7, color=(120, 40, 255), kind="portal_vortex"),
+            LightEvent(edge="top", intensity=0.6, color=(0, 0, 0), kind="negative_wave"),
+        ]
+        numpy_renderer.add_events(events)
+        cpp_renderer.set_wave_snapshot([replace(wave) for wave in numpy_renderer.waves])
+        numpy_leds = numpy_renderer.step(0.05)
+        cpp_leds = cpp_renderer.step(0.05)
+        self.assertLessEqual(int(np.max(np.abs(numpy_leds.astype(np.int16) - cpp_leds.astype(np.int16)))), 4)
+
+    def test_cpp_renderer_native_state_ducking_and_pruning_when_available(self) -> None:
+        if not CppSpatialRenderer.available():
+            self.skipTest("native C++ renderer is not built")
+        spatial = spatial_config()
+        for strip in spatial["strips"]:
+            strip["sync_mode"] = "spatial"
+        config = EngineConfig(total_leds=8, spatial=spatial, brightness=1.0, gamma=1.0, saturation=1.0, color_smoothing=0.0, wave_min_intensity=0.05)
+        topology = SpatialRoomTopology(config)
+        renderer = CppSpatialRenderer(config, topology)
+        renderer.set_wave_snapshot([
+            SpatialLightWave(
+                color=(255, 255, 255),
+                intensity=1.0,
+                origin=topology.room_center(),
+                speed=1.0,
+                decay_rate=0.95,
+                spread=0.5,
+                age=0.0,
+                radius_limit=10.0,
+                kind="explosion",
+            ),
+            SpatialLightWave(
+                color=(255, 0, 0),
+                intensity=0.8,
+                origin=topology.room_center(),
+                speed=50.0,
+                decay_rate=0.50,
+                spread=0.1,
+                age=0.0,
+                radius_limit=0.2,
+                kind="color_bloom",
+            ),
+        ])
+        renderer.duck_lower_priority_waves("explosion", factor=0.25)
+        snapshot = renderer.get_wave_snapshot()
+        self.assertAlmostEqual(snapshot[0].intensity, 1.0, places=3)
+        self.assertAlmostEqual(snapshot[1].intensity, 0.2, places=3)
+        renderer.step(0.2)
+        self.assertEqual(len(renderer.get_wave_snapshot()), 1)
+
+    def test_cpp_renderer_priority_budget_when_available(self) -> None:
+        if not CppSpatialRenderer.available():
+            self.skipTest("native C++ renderer is not built")
+        spatial = spatial_config()
+        for strip in spatial["strips"]:
+            strip["sync_mode"] = "spatial"
+        config = EngineConfig(total_leds=8, spatial=spatial, brightness=1.0, gamma=1.0, saturation=1.0, color_smoothing=0.0, spatial_priority_bands=2)
+        topology = SpatialRoomTopology(config)
+        renderer = CppSpatialRenderer(config, topology)
+        renderer.set_spatial_priority_budget(1)
+        near_indices = renderer._spatial_indices[renderer._spatial_priority_bands[0]]
+        far_indices = renderer._spatial_indices[renderer._spatial_priority_bands[1]]
+        renderer.set_wave_snapshot([
+            SpatialLightWave(
+                color=(255, 80, 20),
+                intensity=1.0,
+                origin=topology.positions[int(near_indices[0])].copy(),
+                speed=0.0,
+                decay_rate=1.0,
+                spread=10.0,
+                age=0.0,
+                radius_limit=10.0,
+                kind="explosion",
+            )
+        ])
+        leds = renderer.step(0.1)
+        self.assertGreater(int(leds[near_indices].max()), 0)
+        self.assertEqual(int(leds[far_indices].max()), 0)
+
+    def test_cpp_renderer_tv_and_front_ambient_paths_when_available(self) -> None:
+        if not CppSpatialRenderer.available():
+            self.skipTest("native C++ renderer is not built")
+        config = EngineConfig(total_leds=8, spatial=spatial_config(), brightness=1.0, gamma=1.0, saturation=1.0, color_smoothing=0.0)
+        topology = SpatialRoomTopology(config)
+        numpy_renderer = VectorizedSpatialRenderer(config, topology)
+        cpp_renderer = CppSpatialRenderer(config, topology)
+        frame = np.zeros((16, 16, 3), dtype=np.uint8)
+        frame[:2, :] = (0, 0, 255)
+        frame[-2:, :] = (0, 255, 0)
+        numpy_renderer.set_tv_frame(frame)
+        cpp_renderer.set_tv_frame(frame)
+        strip_colors = np.tile(np.array([[0.2, 0.7, 1.0]], dtype=np.float32), (topology.front_ambient_indices().size, 1))
+        numpy_renderer.set_front_ambient_strip(strip_colors, 0.6)
+        cpp_renderer.set_front_ambient_strip(strip_colors, 0.6)
+        numpy_leds = numpy_renderer.step(0.05)
+        cpp_leds = cpp_renderer.step(0.05)
+        self.assertEqual(cpp_leds.shape, numpy_leds.shape)
+        self.assertGreater(int(cpp_leds.max()), 0)
+        self.assertLessEqual(int(np.max(np.abs(numpy_leds.astype(np.int16) - cpp_leds.astype(np.int16)))), 8)
+
 
     def test_spatial_priority_budget_renders_near_tv_leds_first(self) -> None:
         config = EngineConfig(total_leds=8, spatial=spatial_config(), brightness=1.0, gamma=1.0, color_smoothing=0.0, spatial_priority_bands=2)

@@ -56,9 +56,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-waves", type=int, default=None, help="Override max active waves for renderer stress cases")
     parser.add_argument("--wave-count", type=int, default=None, help="Override wave count for stress and ceiling modes")
     parser.add_argument("--worst-waves", type=int, default=None, help="Legacy alias for --wave-count")
-    parser.add_argument("--spatial-renderer-backend", choices=["auto", "numpy", "numba", "gles"], default=None, help="Renderer backend for spatial benchmark cases")
+    parser.add_argument("--spatial-renderer-backend", choices=["auto", "cpp", "numpy", "numba"], default=None, help="Renderer backend for spatial benchmark cases")
     parser.add_argument("--renderer-matrix", action="store_true", help="Benchmark renderer-only cases for 240/1300/2000 LEDs and 20/50 waves")
-    parser.add_argument("--backend-comparison", action="store_true", help="Run renderer matrix for numpy, numba, and gles and print a backend comparison table")
+    parser.add_argument("--backend-comparison", action="store_true", help="Run renderer matrix for numpy, numba, and cpp and print a backend comparison table")
+    parser.add_argument("--cpp-probe", action="store_true", help="Run only the C++ renderer proof benchmark matrix")
     parser.add_argument("--probe-backends", action="store_true", help="Probe spatial renderer backends and print exact initialization failures")
     parser.add_argument("--json", action="store_true", help="Print JSON only")
     return parser.parse_args()
@@ -214,10 +215,15 @@ def renderer_step(renderer: object, dt: float = 1.0 / 60.0) -> np.ndarray:
 
 
 def clone_waves(renderer: object) -> list[object]:
+    if hasattr(renderer, "get_wave_snapshot"):
+        return [replace(wave) for wave in renderer.get_wave_snapshot()]  # type: ignore[attr-defined]
     return [replace(wave) for wave in getattr(renderer, "waves", [])]
 
 
 def reset_waves(renderer: object, waves: list[object]) -> None:
+    if hasattr(renderer, "set_wave_snapshot"):
+        renderer.set_wave_snapshot([replace(wave) for wave in waves])  # type: ignore[attr-defined]
+        return
     setattr(renderer, "waves", [replace(wave) for wave in waves])
 
 
@@ -420,12 +426,12 @@ def build_renderer_matrix_cases(config_path: str, config: EngineConfig, profile:
             repeats = max(1, (wave_count // len(worst_event_set())) + 1)
             renderer.add_events((worst_event_set() * repeats)[:wave_count])
             seed = clone_waves(renderer)
+            reset_waves(renderer, seed)
             name = f"renderer.matrix.{renderer_backend_name(renderer)}_{wave_count}_waves_{led_count}_leds"
 
-            def make_case(target: object = renderer, waves: list[object] = seed) -> Callable[[], object]:
+            def make_case(target: object = renderer) -> Callable[[], object]:
                 def run() -> object:
-                    reset_waves(target, waves)
-                    result = renderer_step(target)
+                    result = renderer_step(target, 0.0)
                     return {
                         "leds": result,
                         "backend": renderer_backend_name(target),
@@ -457,7 +463,7 @@ def speedup(base_ms: float, candidate_ms: float) -> float | None:
 
 
 def run_backend_comparison(args: argparse.Namespace, base_config: EngineConfig) -> dict:
-    requested_backends = ["numpy", "numba", "gles"]
+    requested_backends = ["numpy", "numba", "cpp"]
     all_results: list[dict] = []
     by_case: dict[str, dict[str, BenchResult]] = {}
     actual_by_case: dict[str, dict[str, str]] = {}
@@ -484,42 +490,169 @@ def run_backend_comparison(args: argparse.Namespace, base_config: EngineConfig) 
             "case": case_name,
             "numpy_ms": numpy_result.avg_ms if numpy_result else None,
             "numba_ms": results["numba"].avg_ms if "numba" in results else None,
-            "gles_ms": results["gles"].avg_ms if "gles" in results else None,
-            "gles_actual_backend": actual_by_case.get(case_name, {}).get("gles", "unknown"),
+            "cpp_ms": results["cpp"].avg_ms if "cpp" in results else None,
+            "cpp_wave_ms": None,
+            "cpp_post_ms": None,
+            "cpp_full_ms": None,
+            "cpp_available": False,
+            "cpp_error": "",
+            "cpp_actual_backend": actual_by_case.get(case_name, {}).get("cpp", "unknown"),
             "numba_speedup": speedup(numpy_result.avg_ms, results["numba"].avg_ms) if numpy_result and "numba" in results else None,
-            "gles_speedup": speedup(numpy_result.avg_ms, results["gles"].avg_ms) if numpy_result and "gles" in results else None,
+            "cpp_speedup": speedup(numpy_result.avg_ms, results["cpp"].avg_ms) if numpy_result and "cpp" in results else None,
+            "cpp_vs_numba": None,
+            "estimated_full_pipeline_savings_ms": None,
         }
         comparison_rows.append(row)
+
+    cpp_probe = run_cpp_probe_comparison(args, base_config)
+    cpp_by_case = {row["case"]: row for row in cpp_probe["comparison"]}
+    for row in comparison_rows:
+        cpp_row = cpp_by_case.get(row["case"])
+        if not cpp_row:
+            continue
+        row.update(
+            {
+                "cpp_wave_ms": cpp_row["cpp_wave_ms"],
+                "cpp_post_ms": cpp_row["cpp_post_ms"],
+                "cpp_full_ms": cpp_row["cpp_full_ms"],
+                "cpp_available": cpp_row["cpp_available"],
+                "cpp_error": cpp_row["cpp_error"],
+                "cpp_vs_numba": speedup(row["numba_ms"], row["cpp_ms"]) if row["numba_ms"] and row["cpp_ms"] else None,
+                "estimated_full_pipeline_savings_ms": round(row["numba_ms"] - row["cpp_ms"], 4) if row["numba_ms"] and row["cpp_ms"] else None,
+            }
+        )
 
     return {
         "requested_backends": requested_backends,
         "results": all_results,
         "comparison": comparison_rows,
+        "cpp_probe": cpp_probe,
     }
 
 
 def print_backend_comparison(comparison_rows: list[dict]) -> None:
     print("Backend comparison (average ms)")
-    print(f"{'Case':30} {'NumPy':>9} {'Numba':>9} {'GLES':>9} {'Numba x':>9} {'GLES x':>9} {'GLES actual':>12}")
+    print(
+        f"{'Case':30} {'NumPy':>9} {'Numba':>9} {'C++':>9} "
+        f"{'Probe wave':>10} {'Probe post':>10} {'Probe full':>10} {'C++/Numba':>10} {'Est save':>9}"
+    )
     for row in comparison_rows:
         numpy_ms = f"{row['numpy_ms']:.4f}" if row["numpy_ms"] is not None else "-"
         numba_ms = f"{row['numba_ms']:.4f}" if row["numba_ms"] is not None else "-"
-        gles_ms = f"{row['gles_ms']:.4f}" if row["gles_ms"] is not None else "-"
-        numba_x = f"{row['numba_speedup']:.2f}x" if row["numba_speedup"] is not None else "-"
-        gles_x = f"{row['gles_speedup']:.2f}x" if row["gles_speedup"] is not None else "-"
-        print(f"{row['case']:30} {numpy_ms:>9} {numba_ms:>9} {gles_ms:>9} {numba_x:>9} {gles_x:>9} {row['gles_actual_backend']:>12}")
+        cpp_ms = f"{row['cpp_ms']:.4f}" if row["cpp_ms"] is not None else "-"
+        cpp_wave = f"{row['cpp_wave_ms']:.4f}" if row["cpp_wave_ms"] is not None else "-"
+        cpp_post = f"{row['cpp_post_ms']:.4f}" if row["cpp_post_ms"] is not None else "-"
+        cpp_full = f"{row['cpp_full_ms']:.4f}" if row["cpp_full_ms"] is not None else "-"
+        cpp_x = f"{row['cpp_vs_numba']:.2f}x" if row["cpp_vs_numba"] is not None else "-"
+        save = f"{row['estimated_full_pipeline_savings_ms']:.4f}" if row["estimated_full_pipeline_savings_ms"] is not None else "-"
+        print(f"{row['case']:30} {numpy_ms:>9} {numba_ms:>9} {cpp_ms:>9} {cpp_wave:>10} {cpp_post:>10} {cpp_full:>10} {cpp_x:>10} {save:>9}")
+
+
+def build_cpp_probe_case(config_path: str, profile: str, led_count: int, wave_count: int) -> tuple[object, dict, np.ndarray]:
+    import cpp_probe
+
+    case_config = make_config(config_path, profile, led_count)
+    case_config.spatial_renderer_backend = "numpy"
+    case_config.max_active_waves = wave_count
+    topology = SpatialRoomTopology(case_config)
+    renderer = create_effect_renderer(case_config, topology)
+    repeats = max(1, (wave_count // len(worst_event_set())) + 1)
+    renderer.add_events((worst_event_set() * repeats)[:wave_count])
+    seed = clone_waves(renderer)
+    inputs = cpp_probe.wave_probe_inputs(renderer, seed, 1.0 / 60.0)
+    rendered = cpp_probe.render_waves_probe(inputs)
+    return renderer, inputs, rendered
+
+
+def run_cpp_probe_comparison(args: argparse.Namespace, base_config: EngineConfig) -> dict:
+    try:
+        import cpp_probe
+    except Exception as exc:
+        return {
+            "available": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "comparison": [],
+            "results": [],
+        }
+    if not cpp_probe.available():
+        error = cpp_probe.unavailable_reason()
+        rows = [
+            {
+                "case": f"{waves}_waves_{leds}_leds",
+                "cpp_available": False,
+                "cpp_error": error,
+                "cpp_wave_ms": None,
+                "cpp_post_ms": None,
+                "cpp_full_ms": None,
+            }
+            for leds in (240, 1300, 2000)
+            for waves in (20, 50)
+        ]
+        return {"available": False, "error": error, "comparison": rows, "results": []}
+
+    rows: list[dict] = []
+    results: list[dict] = []
+    for led_count in (240, 1300, 2000):
+        for wave_count in (20, 50):
+            case_name = f"{wave_count}_waves_{led_count}_leds"
+            renderer, inputs, rendered = build_cpp_probe_case(args.config, args.profile, led_count, wave_count)
+
+            wave_result = time_case(f"cpp_probe.wave_{case_name}", max(0.05, args.seconds), args.warmup, args.min_iterations, lambda probe_inputs=inputs: cpp_probe.render_waves_probe(probe_inputs))
+            post_result = time_case(
+                f"cpp_probe.post_{case_name}",
+                max(0.05, args.seconds),
+                args.warmup,
+                args.min_iterations,
+                lambda leds=rendered, target=renderer: cpp_probe.post_process_probe(
+                    leds,
+                    getattr(target, "previous_leds"),
+                    float(target.config.color_smoothing),
+                    float(target.config.saturation),
+                    target.config.white_balance,
+                    float(target.config.brightness),
+                    float(target.config.gamma),
+                ),
+            )
+            full_result = time_case(f"cpp_probe.full_{case_name}", max(0.05, args.seconds), args.warmup, args.min_iterations, lambda probe_inputs=inputs, target=renderer: cpp_probe.full_probe(probe_inputs, target))
+            for result, part in ((wave_result, "wave"), (post_result, "post"), (full_result, "full")):
+                row = dict(result.__dict__)
+                row["case"] = case_name
+                row["part"] = part
+                results.append(row)
+            rows.append(
+                {
+                    "case": case_name,
+                    "cpp_available": True,
+                    "cpp_error": "",
+                    "cpp_wave_ms": wave_result.avg_ms,
+                    "cpp_post_ms": post_result.avg_ms,
+                    "cpp_full_ms": full_result.avg_ms,
+                }
+            )
+    return {"available": True, "error": "", "comparison": rows, "results": results}
+
+
+def print_cpp_probe_comparison(comparison_rows: list[dict]) -> None:
+    print("C++ probe comparison (average ms)")
+    print(f"{'Case':30} {'C++ wave':>9} {'C++ post':>9} {'C++ full':>9} {'Status':>16}")
+    for row in comparison_rows:
+        cpp_wave = f"{row['cpp_wave_ms']:.4f}" if row["cpp_wave_ms"] is not None else "-"
+        cpp_post = f"{row['cpp_post_ms']:.4f}" if row["cpp_post_ms"] is not None else "-"
+        cpp_full = f"{row['cpp_full_ms']:.4f}" if row["cpp_full_ms"] is not None else "-"
+        status = "ready" if row["cpp_available"] else row["cpp_error"][:16]
+        print(f"{row['case']:30} {cpp_wave:>9} {cpp_post:>9} {cpp_full:>9} {status:>16}")
 
 
 def probe_backends(config: EngineConfig) -> list[dict]:
     import spatial_renderer
-    from spatial_renderer import GLESSpatialRenderer, NumbaSpatialRenderer, VectorizedSpatialRenderer
+    from spatial_renderer import CppSpatialRenderer, NumbaSpatialRenderer, VectorizedSpatialRenderer
 
     probes: list[dict] = []
     topology = SpatialRoomTopology(config)
     for name, renderer_type in (
         ("numpy", VectorizedSpatialRenderer),
         ("numba", NumbaSpatialRenderer),
-        ("gles", GLESSpatialRenderer),
+        ("cpp", CppSpatialRenderer),
     ):
         try:
             renderer = renderer_type(config, topology)
@@ -569,9 +702,13 @@ def main() -> int:
         config.max_active_waves = max(1, int(args.max_waves))
     wave_override = args.wave_count if args.wave_count is not None else args.worst_waves
     backend_comparison: dict | None = None
+    cpp_probe_comparison: dict | None = None
     backend_probes: list[dict] | None = None
     if args.probe_backends:
         backend_probes = probe_backends(config)
+        cases = []
+    elif args.cpp_probe:
+        cpp_probe_comparison = run_cpp_probe_comparison(args, config)
         cases = []
     elif args.backend_comparison:
         backend_comparison = run_backend_comparison(args, config)
@@ -586,7 +723,7 @@ def main() -> int:
         cases = build_worst_cases(config, wave_count, "ceiling")
     else:
         cases = build_cases(config)
-    results = [] if backend_comparison is not None or backend_probes is not None else [time_case(name, max(0.05, args.seconds), args.warmup, args.min_iterations, fn) for name, fn in cases]
+    results = [] if backend_comparison is not None or cpp_probe_comparison is not None or backend_probes is not None else [time_case(name, max(0.05, args.seconds), args.warmup, args.min_iterations, fn) for name, fn in cases]
     output = {
         "profile": config.runtime_profile,
         "mode": mode,
@@ -607,6 +744,8 @@ def main() -> int:
     }
     if backend_comparison is not None:
         output["backend_comparison"] = backend_comparison
+    if cpp_probe_comparison is not None:
+        output["cpp_probe_comparison"] = cpp_probe_comparison
     if backend_probes is not None:
         output["backend_probes"] = backend_probes
     if args.json:
@@ -617,6 +756,9 @@ def main() -> int:
     elif backend_comparison is not None:
         print(f"Profile: {config.runtime_profile}  Backend comparison  60fps budget: {FRAME_BUDGET_MS_60FPS:.2f} ms")
         print_backend_comparison(backend_comparison["comparison"])
+    elif cpp_probe_comparison is not None:
+        print(f"Profile: {config.runtime_profile}  C++ probe  60fps budget: {FRAME_BUDGET_MS_60FPS:.2f} ms")
+        print_cpp_probe_comparison(cpp_probe_comparison["comparison"])
     else:
         print(f"Profile: {config.runtime_profile}  Mode: {mode}  Render: {config.render_mode}  Backend: {config.spatial_renderer_backend}  LEDs: {config.total_leds}  60fps budget: {FRAME_BUDGET_MS_60FPS:.2f} ms")
         for result in results:

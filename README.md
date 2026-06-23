@@ -58,10 +58,11 @@ The scripts create `.venv`, install `requirements.txt`, run from the project roo
 
 `scripts/linux/setup.sh` also installs optional acceleration dependencies by default:
 
-- Raspberry Pi OS packages for Python native builds, OpenCV, EGL, and OpenGL ES.
-- Python packages `numba` and `moderngl`.
+- Raspberry Pi OS packages for Python native builds and OpenCV.
+- Python package `numba`.
+- The optional C++ spatial renderer extension.
 
-Use `INSTALL_ACCEL=0 scripts/linux/setup.sh` to skip Numba/ModernGL, `INSTALL_GLES=0 scripts/linux/setup.sh` to install Numba without ModernGL, or `INSTALL_SYSTEM_PACKAGES=0 scripts/linux/setup.sh` to skip `apt-get` packages.
+Use `INSTALL_ACCEL=0 scripts/linux/setup.sh` to skip Numba, `INSTALL_CPP_RENDERER=0 scripts/linux/setup.sh` to skip the native renderer build, or `INSTALL_SYSTEM_PACKAGES=0 scripts/linux/setup.sh` to skip `apt-get` packages.
 
 Or generate and install the service for the current checkout path:
 
@@ -87,7 +88,7 @@ Important fields:
 - `send_to_wled`: set `true` to emit LED frames.
 - `runtime_profile`: `desktop_dev`, `pi_zero`, or `pi_5`.
 - `overload_policy`: `adaptive_quality`, `fixed_quality`, or `output_first`.
-- `spatial_renderer_backend`: `auto`, `numpy`, `numba`, or `gles`. `auto` tries the experimental GLES path, then Numba, then the built-in NumPy renderer.
+- `spatial_renderer_backend`: `auto`, `cpp`, `numba`, or `numpy`. `auto` tries the native C++ renderer, then Numba, then the built-in NumPy renderer.
 - `spatial`: optional 3D room model with room dimensions, TV placement, WLED devices, and wall-mounted strips.
 - `total_leds`: total ceiling perimeter LEDs.
 - `front_wall`, `left_wall`, `rear_wall`, `right_wall`: inclusive LED ranges; ranges may wrap across index `0`.
@@ -122,7 +123,7 @@ Benchmark just the spatial renderer at 240, 1300, and 2000 LEDs with 20 and 50 w
 python benchmark_parts.py --profile pi_zero --renderer-matrix --spatial-renderer-backend auto --seconds 2
 ```
 
-Compare NumPy, Numba, and GLES backends in one table:
+Compare NumPy, Numba, and C++ backends in one table:
 
 ```powershell
 python benchmark_parts.py --profile pi_zero --backend-comparison --seconds 2
@@ -213,7 +214,7 @@ Color velocity modifies each wave after detection. Fast color changes increase w
 - For Pi testing, start with `target_fps` at `60` or `90`, `optical_flow_fps: 15`, `frame_difference_fill_enabled: true`, and `frame_difference_fill_fps: 0`.
 - Use `render_mode` to trade analysis quality for CPU. `full_frame` preserves current behavior, `edge_effects` analyzes compact edge bands, and `hybrid_edge_full` samples TV strips from edge bands while detecting effects on a tiny full-frame image.
 - Direct `tv_image` and `blend` strips use the freshest prepared frame in the render loop. Under load, spatial effects degrade before TV sync, prioritizing LEDs closest to the configured TV center before far side/rear LEDs.
-- The spatial renderer can use optional acceleration. `numba` requires a separate Numba install. `gles` requires a working EGL/ModernGL stack and self-tests at startup before it is selected.
+- The spatial renderer can use optional acceleration. `cpp` uses the native C++ extension when it is built, and `numba` remains available as a portable JIT fallback.
 - Keep `analysis_queue_size` and `event_queue_size` small. The default latest-wins queues drop stale analysis work instead of delaying LED output.
 - Limit `max_active_waves` to bound CPU cost.
 - Run with `--no-debug` for live deployments.

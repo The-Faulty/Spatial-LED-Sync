@@ -4,3 +4,4 @@ requests>=2.31
 flatbuffers>=24.3.25
 pillow>=10.0
 websocket-client>=1.8
+pybind11>=2.12

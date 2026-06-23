@@ -275,8 +275,8 @@ class EngineConfig:
             errors.append("event_queue_size must be greater than 0")
         if self.effect_render_skip_policy not in {"tv_first", "none"}:
             errors.append("effect_render_skip_policy must be tv_first or none")
-        if self.spatial_renderer_backend not in {"auto", "numpy", "numba", "gles"}:
-            errors.append("spatial_renderer_backend must be auto, numpy, numba, or gles")
+        if self.spatial_renderer_backend not in {"auto", "cpp", "numpy", "numba"}:
+            errors.append("spatial_renderer_backend must be auto, cpp, numpy, or numba")
         if self.spatial_priority_bands <= 0:
             errors.append("spatial_priority_bands must be greater than 0")
         for name in ("spatial_near_budget_ratio", "spatial_mid_budget_ratio", "spatial_far_budget_ratio"):

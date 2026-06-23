@@ -6,7 +6,7 @@ PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/../.." >/dev/null 2>&1 && pwd)"
 VENV_DIR="${PROJECT_ROOT}/.venv"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 INSTALL_ACCEL="${INSTALL_ACCEL:-1}"
-INSTALL_GLES="${INSTALL_GLES:-1}"
+INSTALL_CPP_RENDERER="${INSTALL_CPP_RENDERER:-1}"
 INSTALL_SYSTEM_PACKAGES="${INSTALL_SYSTEM_PACKAGES:-1}"
 
 cd "${PROJECT_ROOT}"
@@ -24,6 +24,7 @@ install_deps() {
   install_system_packages
   "${VENV_DIR}/bin/python" -m pip install --upgrade pip setuptools wheel
   "${VENV_DIR}/bin/python" -m pip install -r requirements.txt
+  install_cpp_renderer
   install_acceleration_deps
 }
 
@@ -40,13 +41,13 @@ install_system_packages() {
   local sudo_cmd=()
   if [[ "${EUID}" -ne 0 ]]; then
     if ! command -v sudo >/dev/null 2>&1; then
-      echo "sudo not found; skipping system packages. Install EGL/GLES packages manually for the GLES backend."
+      echo "sudo not found; skipping system packages. Native renderer builds may need build-essential and python3-dev."
       return
     fi
     sudo_cmd=(sudo)
   fi
 
-  echo "Installing Raspberry Pi OS packages for Python builds, OpenCV, EGL, and OpenGL ES..."
+  echo "Installing Raspberry Pi OS packages for Python builds and OpenCV..."
   "${sudo_cmd[@]}" apt-get update
 
   local packages=(
@@ -55,10 +56,6 @@ install_system_packages() {
     python3-dev
     libgl1
     libgl1-mesa-dri
-    libegl1
-    libegl-mesa0
-    libgles2
-    libglvnd0
     libglib2.0-0
   )
 
@@ -92,11 +89,16 @@ install_acceleration_deps() {
 
   echo "Installing optional spatial renderer acceleration packages..."
   "${VENV_DIR}/bin/python" -m pip install numba
-  if [[ "${INSTALL_GLES}" == "1" ]]; then
-    "${VENV_DIR}/bin/python" -m pip install moderngl
-  else
-    echo "Skipping ModernGL because INSTALL_GLES=${INSTALL_GLES}."
+}
+
+install_cpp_renderer() {
+  if [[ "${INSTALL_CPP_RENDERER}" != "1" ]]; then
+    echo "Skipping C++ renderer build because INSTALL_CPP_RENDERER=${INSTALL_CPP_RENDERER}."
+    return
   fi
+
+  echo "Building optional C++ spatial renderer..."
+  "${VENV_DIR}/bin/python" setup.py build_ext --inplace
 }
 
 run_python() {
