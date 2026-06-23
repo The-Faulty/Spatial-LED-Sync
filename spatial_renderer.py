@@ -756,6 +756,7 @@ class GLESSpatialRenderer(VectorizedSpatialRenderer):
 
         context_errors: list[str] = []
         context_attempts: list[tuple[str | None, int]] = [
+            ("egl", 0),
             ("egl", 200),
             ("egl", 210),
             ("egl", 330),
@@ -763,7 +764,7 @@ class GLESSpatialRenderer(VectorizedSpatialRenderer):
         if sys.platform.startswith("linux") and os.environ.get("SPATIAL_RENDERER_ALLOW_GLX", "0") != "1":
             pass
         else:
-            context_attempts.extend([(None, 200), (None, 330)])
+            context_attempts.extend([(None, 0), (None, 200), (None, 330)])
         for backend, require in context_attempts:
             try:
                 if backend is None:
