@@ -48,11 +48,12 @@ class WaveEngine:
 
     def add_events(self, events: list[LightEvent]) -> None:
         for event in events:
+            brightness_gain = self._event_brightness_gain(event)
             if event.kind == "front_ambient":
                 target = np.array(event.color, dtype=np.float32) / 255.0
                 if self.front_ambient_strip_colors is None or self.config.front_ambient_source == "average":
                     self.front_ambient_color = self.front_ambient_color * 0.80 + target * 0.20
-                self.front_ambient_intensity = max(self.front_ambient_intensity * 0.85, event.intensity)
+                self.front_ambient_intensity = max(self.front_ambient_intensity * 0.85, brightness_gain)
                 continue
 
             for position, direction, radius in self._wave_specs(event):
@@ -91,7 +92,7 @@ class WaveEngine:
                     self.waves.append(
                         LightWave(
                             color=event.color,
-                            intensity=event.intensity * (1.0 - pulse * 0.035),
+                            intensity=brightness_gain * (1.0 - pulse * 0.035),
                             position=(float(position) + pulse_phase * self.config.total_leds * 0.2) % self.config.total_leds,
                             velocity=speed * (0.85 + pulse_phase * 0.35),
                             decay_rate=decay,
@@ -147,12 +148,23 @@ class WaveEngine:
         fade_boost = color_velocity * self.config.color_velocity_decay_boost
         return float(np.clip(base_decay - fade_boost, 0.50, 0.999))
 
+    def _event_brightness_gain(self, event: LightEvent) -> float:
+        intensity = float(np.clip(event.intensity, 0.0, 1.0))
+        if event.kind in {"front_ambient", "color_bloom", "underwater"}:
+            return intensity
+        if not self.config.variable_event_intensity:
+            return 1.0
+        return float(np.clip(intensity**0.7, 0.0, 1.0))
+
     def _wave_specs(self, event: LightEvent) -> list[tuple[int, int, float]]:
         if self.config.lighting_mode == "front_ambient" and event.edge == "top":
             return self._front_ambient_boundary_specs(event)
 
         origin = self.topology.origin_for_edge(event.edge, event.intensity)
-        if event.kind in ("explosion", "flash", "impact_pulse", "shockwave", "color_bloom", "underwater", "portal_vortex", "negative_wave", "ember_particles"):
+        if event.kind == "shockwave" and event.direction_hint:
+            radius = self.config.total_leds / 2
+            directions = (event.direction_hint,)
+        elif event.kind in ("explosion", "flash", "impact_pulse", "shockwave", "color_bloom", "underwater", "portal_vortex", "negative_wave", "ember_particles"):
             radius = self.config.total_leds / 2
             directions = (-1, 1)
         elif event.kind in {"camera_pan", "directional_sweep", "scene_wipe", "energy_trail"} and event.direction_hint:
@@ -164,7 +176,9 @@ class WaveEngine:
         return [(origin.led, direction, radius) for direction in directions]
 
     def _front_ambient_boundary_specs(self, event: LightEvent) -> list[tuple[int, int, float]]:
-        if event.kind in ("explosion", "flash", "impact_pulse", "shockwave", "color_bloom", "underwater", "portal_vortex", "negative_wave") or event.intensity >= self.config.room_fill_threshold:
+        if event.kind == "shockwave" and event.direction_hint:
+            radius = self.config.total_leds / 2
+        elif event.kind in ("explosion", "flash", "impact_pulse", "shockwave", "color_bloom", "underwater", "portal_vortex", "negative_wave") or event.intensity >= self.config.room_fill_threshold:
             radius = self.config.total_leds / 2
         elif event.intensity >= self.config.level2_threshold:
             radius = self.config.strong_spill_radius
@@ -296,7 +310,7 @@ class WaveEngine:
     def _render_wave(self, leds: np.ndarray, wave: LightWave, travelled: float) -> None:
         rgb = np.array(wave.color, dtype=np.float32) / 255.0
         dist = self.topology.signed_distances(wave.position, wave.direction)
-        bidirectional = wave.kind in {"flash", "explosion", "impact_pulse", "shockwave", "color_bloom", "underwater", "portal_vortex", "negative_wave"}
+        bidirectional = wave.kind in {"flash", "explosion", "impact_pulse", "color_bloom", "underwater", "portal_vortex", "negative_wave"} or (wave.kind == "shockwave" and wave.width >= 0.5)
         if bidirectional:
             dist = np.minimum(dist, self.topology.signed_distances(wave.position, -wave.direction))
         spread_scale = 4.5 if wave.kind in {"color_bloom", "underwater"} else 2.8

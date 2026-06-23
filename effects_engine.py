@@ -18,7 +18,7 @@ from hyperhdr_client import HyperHDRClient
 from motion_detector import AnalysisRequirements, MotionAnalysis, MotionDetector
 from performance import apply_runtime_profile
 from spatial_config import parse_spatial_config
-from spatial_renderer import SpatialRenderer, VectorizedSpatialRenderer
+from spatial_renderer import SpatialRenderer, VectorizedSpatialRenderer, create_spatial_renderer
 from spatial_topology import SpatialRoomTopology
 from topology import RoomTopology
 from wave_engine import WaveEngine
@@ -87,7 +87,7 @@ def create_effect_renderer(
     topology: RoomTopology | SpatialRoomTopology,
 ) -> SpatialRenderer | WaveEngine:
     if isinstance(topology, SpatialRoomTopology):
-        return VectorizedSpatialRenderer(config, topology)
+        return create_spatial_renderer(config, topology)
     return WaveEngine(config, topology)
 
 
@@ -118,6 +118,8 @@ class HeadlessEffectsEngine:
         self.analysis_stride = 1
         self._analysis_tick = 0
         self.last_analysis_time = 0.0
+        self.last_optical_flow_time = 0.0
+        self.last_frame_difference_fill_time = 0.0
         self.frame_history: deque[np.ndarray] = deque(maxlen=12)
         self.snapshot = RuntimeSnapshot()
         self._parallel_enabled = False
@@ -156,6 +158,19 @@ class HeadlessEffectsEngine:
             retain_flow_debug=needs_full_flow or needs_edges,
         )
 
+    def frame_difference_fill_requirements(self, full: AnalysisRequirements | None = None) -> AnalysisRequirements:
+        full = full or self.analysis_requirements()
+        if not full.any_analysis:
+            return AnalysisRequirements(False, False, False, False, False, False)
+        return AnalysisRequirements(
+            color_stats=full.color_stats,
+            frame_difference=full.frame_difference,
+            edge_activity=False,
+            top_corner_activity=False,
+            optical_flow=False,
+            retain_flow_debug=False,
+        )
+
     def start(self) -> None:
         if self.running:
             return
@@ -182,6 +197,8 @@ class HeadlessEffectsEngine:
         now = time.monotonic()
         self.last_step = now
         self.last_analysis_time = 0.0
+        self.last_optical_flow_time = 0.0
+        self.last_frame_difference_fill_time = 0.0
         self.stat_time = now
         self.stat_frames = 0
         self.snapshot = RuntimeSnapshot(
@@ -250,9 +267,15 @@ class HeadlessEffectsEngine:
                 self.frame_history.append(frame.copy())
                 self.wave_engine.set_tv_frame(render_frames.tv_frame)
                 if requirements.any_analysis:
-                    analysis = self.motion.analyze(render_frames.analysis_frame, requirements)
+                    pass_requirements, fill_pass = self._requirements_for_due_analysis(requirements, advance=True)
+                    if pass_requirements is None:
+                        self.skipped_analysis_frames += 1
+                        continue
+                    analysis = self.motion.analyze(render_frames.analysis_frame, pass_requirements)
                     self.analysis_frames += 1
                     candidates = self.event_detector.detect(analysis)
+                    if fill_pass:
+                        candidates = self._filter_frame_difference_fill_events(candidates)
                     candidate_events = len(candidates)
                     detected = self.event_mixer.mix(candidates)
                     log_events = [event for event in detected if event.kind != "front_ambient"]
@@ -354,7 +377,7 @@ class HeadlessEffectsEngine:
 
     def _analysis_loop(self) -> None:
         assert self.processor and self.motion and self.event_detector
-        interval = 1.0 / max(1, min(int(self.config.motion_analysis_fps), int(self.config.target_fps)))
+        interval = 1.0 / self._analysis_worker_fps()
         next_due = time.monotonic()
         last_revision = 0
         while not self._stop_event.is_set():
@@ -377,14 +400,21 @@ class HeadlessEffectsEngine:
                 self.skipped_analysis_frames += 1
                 continue
 
-            result = self._analyze_frame_for_parallel(frame, requirements)
+            requirements, fill_pass = self._requirements_for_due_analysis(requirements, now, advance=True)
+            if requirements is None:
+                self.skipped_analysis_frames += 1
+                continue
+
+            result = self._analyze_frame_for_parallel(frame, requirements, fill_pass=fill_pass)
             self._put_analysis_result(result)
 
-    def _analyze_frame_for_parallel(self, frame: np.ndarray, requirements: AnalysisRequirements) -> AnalysisResult:
+    def _analyze_frame_for_parallel(self, frame: np.ndarray, requirements: AnalysisRequirements, fill_pass: bool = False) -> AnalysisResult:
         assert self.motion and self.event_detector
         analysis = self.motion.analyze(frame, requirements)
         self.analysis_frames += 1
         candidates = self.event_detector.detect(analysis)
+        if fill_pass:
+            candidates = self._filter_frame_difference_fill_events(candidates)
         detected = self.event_mixer.mix(candidates)
         front_colors: np.ndarray | None = None
         front_intensity = 0.0
@@ -644,7 +674,9 @@ class HeadlessEffectsEngine:
         return frames
 
     def _analysis_due(self) -> bool:
-        fps = min(max(1, int(self.config.motion_analysis_fps)), max(1, int(self.config.target_fps)))
+        if not self.analysis_requirements().any_analysis:
+            return False
+        fps = self._analysis_worker_fps()
         if fps >= max(1, int(self.config.target_fps)):
             return True
         now = time.monotonic()
@@ -652,3 +684,69 @@ class HeadlessEffectsEngine:
             self.last_analysis_time = now
             return True
         return now - self.last_analysis_time >= 1.0 / fps
+
+    def _analysis_worker_fps(self) -> int:
+        requirements = self.analysis_requirements()
+        full_fps = self._full_analysis_fps(requirements)
+        if self.config.frame_difference_fill_enabled:
+            return max(full_fps, self._fill_analysis_fps())
+        return full_fps
+
+    def _full_analysis_fps(self, requirements: AnalysisRequirements) -> int:
+        fps = min(max(1, int(self.config.motion_analysis_fps)), max(1, int(self.config.target_fps)))
+        if requirements.optical_flow:
+            fps = min(fps, max(1, int(self.config.optical_flow_fps)))
+        return max(1, fps)
+
+    def _fill_analysis_fps(self) -> int:
+        target = max(1, int(self.config.target_fps))
+        configured = int(self.config.frame_difference_fill_fps)
+        if configured <= 0:
+            return target
+        return max(1, min(configured, target))
+
+    def _requirements_for_due_analysis(
+        self,
+        full: AnalysisRequirements,
+        now: float | None = None,
+        advance: bool = False,
+    ) -> tuple[AnalysisRequirements | None, bool]:
+        if not full.any_analysis:
+            return None, False
+        now = time.monotonic() if now is None else now
+        full_fps = self._full_analysis_fps(full)
+        full_due = self.last_optical_flow_time <= 0.0 or now - self.last_optical_flow_time >= 1.0 / full_fps
+        if full_due:
+            if advance:
+                self.last_optical_flow_time = now
+                self.last_analysis_time = now
+            return full, False
+
+        if not self.config.frame_difference_fill_enabled:
+            return None, False
+        fill = self.frame_difference_fill_requirements(full)
+        if not fill.any_analysis:
+            return None, False
+        fill_fps = self._fill_analysis_fps()
+        fill_due = self.last_frame_difference_fill_time <= 0.0 or now - self.last_frame_difference_fill_time >= 1.0 / fill_fps
+        if not fill_due:
+            return None, False
+        if advance:
+            self.last_frame_difference_fill_time = now
+        return fill, True
+
+    @staticmethod
+    def _filter_frame_difference_fill_events(events: list[LightEvent]) -> list[LightEvent]:
+        allowed = {
+            "front_ambient",
+            "flash",
+            "explosion",
+            "shockwave",
+            "lightning",
+            "impact_pulse",
+            "negative_wave",
+            "color_bloom",
+            "underwater",
+            "ember_particles",
+        }
+        return [event for event in events if event.kind in allowed or event.effect_id in allowed]

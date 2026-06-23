@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
+import time
 from typing import Protocol
 
 import cv2
@@ -60,10 +62,169 @@ class SpatialLightWave:
     secondary: bool = False
 
 
+WAVE_KIND_CODES = {
+    "flash": 1,
+    "explosion": 1,
+    "impact_pulse": 2,
+    "shockwave": 3,
+    "directional_sweep": 4,
+    "scene_wipe": 4,
+    "energy_trail": 5,
+    "flame_shimmer": 6,
+    "underwater": 7,
+    "portal_vortex": 8,
+    "color_bloom": 9,
+    "lightning": 10,
+    "ember_particles": 11,
+    "negative_wave": 12,
+}
+
+
+def _wave_kind_code(kind: str) -> int:
+    return WAVE_KIND_CODES.get(kind, 0)
+
+
+def _numba_render_kernel():
+    try:
+        from numba import njit
+    except Exception:
+        return None
+
+    @njit(cache=True, fastmath=True)
+    def render_kernel(
+        leds,
+        spatial_idx,
+        positions,
+        angles,
+        kind_codes,
+        colors,
+        intensities,
+        origins,
+        speeds,
+        ages,
+        radius_limits,
+        spreads,
+        widths,
+        direction_hints,
+        phases,
+        room_diagonal,
+        room_width,
+        room_depth,
+    ):
+        for wave_index in range(kind_codes.shape[0]):
+            kind = kind_codes[wave_index]
+            intensity = intensities[wave_index]
+            origin_x = origins[wave_index, 0]
+            origin_y = origins[wave_index, 1]
+            origin_z = origins[wave_index, 2]
+            travelled = speeds[wave_index] * ages[wave_index]
+            radius_limit = radius_limits[wave_index]
+            spread = spreads[wave_index]
+            width = widths[wave_index]
+            direction_hint = direction_hints[wave_index]
+            phase = phases[wave_index]
+            travel_fade = max(0.0, 1.0 - travelled / max(0.1, radius_limit))
+            contribution_scale = intensity * (0.2 + 0.8 * travel_fade)
+            red = colors[wave_index, 0] * contribution_scale
+            green = colors[wave_index, 1] * contribution_scale
+            blue = colors[wave_index, 2] * contribution_scale
+
+            for local_index in range(spatial_idx.shape[0]):
+                dx = positions[local_index, 0] - origin_x
+                dy = positions[local_index, 1] - origin_y
+                dz = positions[local_index, 2] - origin_z
+                distances_sq = dx * dx + dy * dy + dz * dz
+                envelope = 0.0
+
+                if kind == 1:
+                    fill_radius = max(spread, travelled + spread)
+                    envelope = math.exp(-distances_sq / (2.0 * fill_radius * fill_radius))
+                elif kind == 2:
+                    fill_radius = max(room_diagonal, travelled + spread)
+                    local = math.exp(-distances_sq / (2.0 * fill_radius * fill_radius))
+                    collapse = max(0.0, 1.0 - ages[wave_index] / max(0.2, width))
+                    envelope = max(local, 0.45 * collapse)
+                elif kind == 3:
+                    distance = math.sqrt(distances_sq)
+                    ring_width = max(spread * 0.45, width * 0.08)
+                    ring = math.exp(-((distance - travelled) * (distance - travelled)) / (2.0 * ring_width * ring_width))
+                    room_flash = max(0.0, 1.0 - travelled / max(0.1, radius_limit)) * 0.32
+                    if direction_hint != 0:
+                        sign = 1.0 if direction_hint > 0 else -1.0
+                        projection = dx * sign
+                        forward = min(max((projection / max(distance, 0.001) + 1.0) * 0.5, 0.0), 1.0)
+                        gate = min(max(forward * 1.35, 0.0), 1.0)
+                        ring *= gate
+                        room_flash *= 0.35 + 0.65 * gate
+                    envelope = max(ring, room_flash)
+                elif kind == 4:
+                    axis = positions[local_index, 0]
+                    span = max(max(room_width, room_depth), 0.1)
+                    front = (travelled / max(0.1, radius_limit)) * span
+                    if direction_hint < 0:
+                        front = span - front
+                    sweep_width = max(0.12, width * 0.25)
+                    envelope = math.exp(-((axis - front) * (axis - front)) / (2.0 * sweep_width * sweep_width))
+                elif kind == 5:
+                    distance = math.sqrt(distances_sq)
+                    head = math.exp(-((distance - travelled) * (distance - travelled)) / (2.0 * spread * spread))
+                    tail_distance = distance - max(0.0, travelled - spread * 3.0)
+                    tail_spread = spread * 2.2
+                    tail = math.exp(-(tail_distance * tail_distance) / (2.0 * tail_spread * tail_spread)) * 0.45
+                    envelope = max(head, tail)
+                elif kind == 6:
+                    noise = 0.65 + 0.35 * math.sin(positions[local_index, 0] * 7.0 + positions[local_index, 2] * 5.0 + ages[wave_index] * 18.0 + phase * 6.28)
+                    local_spread = max(spread * 2.4, 0.1)
+                    envelope = math.exp(-distances_sq / (2.0 * local_spread * local_spread)) * noise
+                elif kind == 7:
+                    distance = math.sqrt(distances_sq)
+                    ripple_base = math.sin(distance * 6.0 - ages[wave_index] * 4.0 + phase * 6.28)
+                    ripple = 0.45 + 0.55 * ripple_base * ripple_base
+                    local_spread = max(spread * 5.0, 0.1)
+                    envelope = math.exp(-distances_sq / (2.0 * local_spread * local_spread)) * ripple
+                elif kind == 8:
+                    distance = math.sqrt(distances_sq)
+                    turns = max(1, direction_hint)
+                    spiral = 0.5 + 0.5 * math.sin(angles[local_index] * 3.0 * turns + distance * 4.0 - ages[wave_index] * 6.0)
+                    vortex_spread = spread * 2.5
+                    drift = distance - travelled * 0.45
+                    envelope = math.exp(-(drift * drift) / (2.0 * vortex_spread * vortex_spread)) * spiral
+                elif kind == 9 or kind == 10 or kind == 11:
+                    bloom_spread = spread * 4.0 if kind == 9 else spread
+                    local_spread = max(bloom_spread, 0.1)
+                    envelope = math.exp(-distances_sq / (2.0 * local_spread * local_spread))
+                    if kind == 10 and intensity >= 0.72:
+                        strobe = 1.0 if int(ages[wave_index] * 28.0 + phase * 7.0) % 2 == 0 else 0.0
+                        envelope = max(envelope, strobe * intensity * 0.55)
+                else:
+                    distance = math.sqrt(distances_sq)
+                    envelope = math.exp(-((distance - travelled) * (distance - travelled)) / (2.0 * spread * spread))
+
+                led_index = spatial_idx[local_index]
+                if kind == 12:
+                    dim = envelope * intensity * 0.65
+                    leds[led_index, 0] -= dim
+                    leds[led_index, 1] -= dim
+                    leds[led_index, 2] -= dim
+                else:
+                    leds[led_index, 0] += envelope * red
+                    leds[led_index, 1] += envelope * green
+                    leds[led_index, 2] += envelope * blue
+
+    return render_kernel
+
+
+_NUMBA_RENDER_KERNEL = None
+
+
 class VectorizedSpatialRenderer:
     def __init__(self, config: EngineConfig, topology: SpatialRoomTopology):
         self.config = config
         self.topology = topology
+        self.render_backend = "numpy"
+        self.render_backend_status = "ready"
+        self.last_render_ms = 0.0
+        self.last_readback_ms = 0.0
         self.accepts_front_ambient_strip_sample = True
         self.waves: list[SpatialLightWave] = []
         self.previous_leds = np.zeros((topology.total, 3), dtype=np.float32)
@@ -91,10 +252,11 @@ class VectorizedSpatialRenderer:
     def add_events(self, events: list[LightEvent]) -> None:
         diagonal = max(0.1, self.topology.room_diagonal())
         for event in events:
+            brightness_gain = self._event_brightness_gain(event)
             if event.kind == "front_ambient":
                 color = np.array(event.color, dtype=np.float32) / 255.0
                 self.front_ambient_color = self.front_ambient_color * 0.85 + color * 0.15
-                self.front_ambient_intensity = max(self.front_ambient_intensity * 0.8, event.intensity)
+                self.front_ambient_intensity = max(self.front_ambient_intensity * 0.8, brightness_gain)
                 continue
             color_velocity = float(np.clip(event.color_velocity, 0.0, 1.0))
             speed = diagonal * 0.18 * self.config.wave_speed * (0.55 + event.intensity * 1.35)
@@ -137,7 +299,7 @@ class VectorizedSpatialRenderer:
                 self.waves.append(
                     SpatialLightWave(
                         color=event.color,
-                        intensity=event.intensity * (1.0 - pulse * 0.035),
+                        intensity=brightness_gain * (1.0 - pulse * 0.035),
                         origin=origin + offset,
                         speed=speed * (0.85 + pulse_phase * 0.35),
                         decay_rate=decay,
@@ -199,7 +361,10 @@ class VectorizedSpatialRenderer:
     def step(self, dt: float) -> np.ndarray:
         leds = self._working_leds
         leds.fill(0.0)
+        render_started = time.perf_counter()
         self._render_spatial_waves(leds, dt)
+        self.last_render_ms = (time.perf_counter() - render_started) * 1000.0
+        self.last_readback_ms = 0.0
         self._apply_tv_sync(leds)
         self._render_front_ambient(leds, dt)
         leds = np.clip(leds, 0.0, 1.0)
@@ -239,6 +404,13 @@ class VectorizedSpatialRenderer:
                 ring_width = max(wave.spread * 0.45, wave.width * 0.08)
                 ring = np.exp(-((distances - travelled) ** 2) / (2.0 * ring_width**2))
                 room_flash = max(0.0, 1.0 - travelled / max(0.1, wave.radius_limit)) * 0.32
+                if wave.direction_hint:
+                    direction = np.array([float(np.sign(wave.direction_hint)), 0.0, 0.0], dtype=np.float32)
+                    projection = offset @ direction
+                    forward = np.clip((projection / np.maximum(distances, 0.001) + 1.0) * 0.5, 0.0, 1.0)
+                    gate = np.clip(forward * 1.35, 0.0, 1.0)
+                    ring *= gate
+                    room_flash *= 0.35 + 0.65 * gate
                 envelope = np.maximum(ring, room_flash)
             elif wave.kind in {"directional_sweep", "scene_wipe"}:
                 axis = positions[:, 0] if abs(wave.direction_hint) >= 0 else positions[:, 2]
@@ -424,6 +596,14 @@ class VectorizedSpatialRenderer:
             return diagonal * 0.35
         return diagonal * 0.2
 
+    def _event_brightness_gain(self, event: LightEvent) -> float:
+        intensity = float(np.clip(event.intensity, 0.0, 1.0))
+        if event.kind in {"front_ambient", "color_bloom", "underwater"}:
+            return intensity
+        if not self.config.variable_event_intensity:
+            return 1.0
+        return float(np.clip(intensity**0.7, 0.0, 1.0))
+
     def _post_process(self, leds: np.ndarray) -> np.ndarray:
         np.clip(leds, 0, 1, out=leds)
         leds = leds.astype(np.float32, copy=False)
@@ -437,3 +617,408 @@ class VectorizedSpatialRenderer:
         if abs(gamma - 1.0) > 0.001:
             leds = np.power(leds, 1.0 / gamma)
         return np.clip(leds * 255.0, 0, 255).astype(np.uint8)
+
+
+class NumbaSpatialRenderer(VectorizedSpatialRenderer):
+    def __init__(self, config: EngineConfig, topology: SpatialRoomTopology):
+        super().__init__(config, topology)
+        self.render_backend = "numba"
+        self.render_backend_status = "ready"
+        self._kernel = self._load_kernel()
+        self._warm_numba_kernel()
+
+    @staticmethod
+    def available() -> bool:
+        return _numba_render_kernel() is not None
+
+    def _load_kernel(self):
+        global _NUMBA_RENDER_KERNEL
+        if _NUMBA_RENDER_KERNEL is None:
+            _NUMBA_RENDER_KERNEL = _numba_render_kernel()
+        if _NUMBA_RENDER_KERNEL is None:
+            raise RuntimeError("numba is not available")
+        return _NUMBA_RENDER_KERNEL
+
+    def _warm_numba_kernel(self) -> None:
+        leds = np.zeros((1, 3), dtype=np.float32)
+        self._kernel(
+            leds,
+            np.array([0], dtype=np.int32),
+            np.array([[0.0, 0.0, 0.0]], dtype=np.float32),
+            np.array([0.0], dtype=np.float32),
+            np.array([1], dtype=np.int32),
+            np.array([[1.0, 0.0, 0.0]], dtype=np.float32),
+            np.array([1.0], dtype=np.float32),
+            np.array([[0.0, 0.0, 0.0]], dtype=np.float32),
+            np.array([1.0], dtype=np.float32),
+            np.array([0.1], dtype=np.float32),
+            np.array([5.0], dtype=np.float32),
+            np.array([0.5], dtype=np.float32),
+            np.array([1.0], dtype=np.float32),
+            np.array([0], dtype=np.int32),
+            np.array([0.0], dtype=np.float32),
+            5.0,
+            4.0,
+            3.0,
+        )
+        if leds.shape != (1, 3) or float(leds.max()) <= 0.0:
+            raise RuntimeError("numba renderer self-test failed")
+
+    def _render_spatial_waves(self, leds: np.ndarray, dt: float) -> None:
+        if self.topology.total == 0 or self._spatial_indices.size == 0:
+            return
+        spatial_idx, positions, angles, skipped = self._priority_render_selection()
+        self.last_spatial_priority_band_skips = skipped
+        if spatial_idx.size == 0:
+            return
+
+        active: list[SpatialLightWave] = []
+        for wave in self.waves:
+            wave.age += dt
+            wave.intensity *= wave.decay_rate ** (dt * 30.0)
+            travelled = wave.speed * wave.age
+            if wave.intensity < self.config.wave_min_intensity or travelled > wave.radius_limit + wave.spread * 3.0:
+                continue
+            active.append(wave)
+        self.waves = active
+        if not active:
+            return
+
+        kind_codes = np.array([_wave_kind_code(wave.kind) for wave in active], dtype=np.int32)
+        colors = np.array([wave.color for wave in active], dtype=np.float32) / 255.0
+        intensities = np.array([wave.intensity for wave in active], dtype=np.float32)
+        origins = np.stack([wave.origin.astype(np.float32, copy=False) for wave in active]).astype(np.float32, copy=False)
+        speeds = np.array([wave.speed for wave in active], dtype=np.float32)
+        ages = np.array([wave.age for wave in active], dtype=np.float32)
+        radius_limits = np.array([wave.radius_limit for wave in active], dtype=np.float32)
+        spreads = np.array([wave.spread for wave in active], dtype=np.float32)
+        widths = np.array([wave.width for wave in active], dtype=np.float32)
+        direction_hints = np.array([wave.direction_hint for wave in active], dtype=np.int32)
+        phases = np.array([wave.phase for wave in active], dtype=np.float32)
+        room = self.topology.spatial.room
+        self._kernel(
+            leds,
+            spatial_idx.astype(np.int32, copy=False),
+            positions.astype(np.float32, copy=False),
+            angles.astype(np.float32, copy=False),
+            kind_codes,
+            colors,
+            intensities,
+            origins,
+            speeds,
+            ages,
+            radius_limits,
+            spreads,
+            widths,
+            direction_hints,
+            phases,
+            float(self._room_diagonal),
+            float(room.width),
+            float(room.depth),
+        )
+
+
+class GLESSpatialRenderer(VectorizedSpatialRenderer):
+    MAX_GLES_WAVES = 128
+
+    def __init__(self, config: EngineConfig, topology: SpatialRoomTopology):
+        super().__init__(config, topology)
+        self.render_backend = "gles"
+        self.render_backend_status = "probing"
+        self._ctx = None
+        self._program = None
+        self._vertex_array = None
+        self._framebuffer = None
+        self._output_texture = None
+        self._position_texture = None
+        self._angle_texture = None
+        self._selection_texture = None
+        self._wave_texture = None
+        self._readback = np.zeros((max(1, topology.total), 4), dtype=np.float32)
+        self._initialize_gles()
+        self.render_backend_status = "ready"
+
+    @staticmethod
+    def available() -> bool:
+        try:
+            import moderngl  # noqa: F401
+        except Exception:
+            return False
+        return True
+
+    def _initialize_gles(self) -> None:
+        try:
+            import moderngl
+        except Exception as exc:
+            raise RuntimeError("moderngl is not available for the GLES renderer") from exc
+
+        context_errors: list[str] = []
+        for backend in ("egl", None):
+            try:
+                if backend is None:
+                    self._ctx = moderngl.create_standalone_context()
+                else:
+                    self._ctx = moderngl.create_standalone_context(backend=backend)
+                break
+            except Exception as exc:
+                label = "default" if backend is None else backend
+                context_errors.append(f"{label}: {type(exc).__name__}: {exc}")
+        if self._ctx is None:
+            raise RuntimeError("standalone OpenGL context creation failed; " + "; ".join(context_errors))
+
+        total = max(1, int(self.topology.total))
+        vertex_shader = """
+            #version 100
+            attribute vec2 in_pos;
+            void main() {
+                gl_Position = vec4(in_pos, 0.0, 1.0);
+            }
+        """
+        fragment_shader = """
+            #version 100
+            precision highp float;
+            const int MAX_WAVES = %(max_waves)d;
+            uniform sampler2D position_tex;
+            uniform sampler2D angle_tex;
+            uniform sampler2D selection_tex;
+            uniform sampler2D wave_tex;
+            uniform float led_count;
+            uniform float wave_tex_width;
+            uniform int wave_count;
+            uniform float room_diagonal;
+            uniform float room_width;
+            uniform float room_depth;
+
+            vec4 wave_row(int wave_index, float row) {{
+                float x = (float(wave_index) + 0.5) / wave_tex_width;
+                return texture2D(wave_tex, vec2(x, (row + 0.5) / 4.0));
+            }}
+
+            void main() {
+                float led_index = floor(gl_FragCoord.x);
+                float led_u = (led_index + 0.5) / led_count;
+                float selected = texture2D(selection_tex, vec2(led_u, 0.5)).r;
+                if (selected < 0.5) {
+                    gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+                    return;
+                }
+
+                vec3 position = texture2D(position_tex, vec2(led_u, 0.5)).rgb;
+                float angle = texture2D(angle_tex, vec2(led_u, 0.5)).r;
+                vec3 accum = vec3(0.0);
+
+                for (int i = 0; i < MAX_WAVES; i++) {
+                    if (i >= wave_count) {
+                        break;
+                    }
+                    vec4 row0 = wave_row(i, 0.0);
+                    vec4 row1 = wave_row(i, 1.0);
+                    vec4 row2 = wave_row(i, 2.0);
+                    vec4 row3 = wave_row(i, 3.0);
+                    int kind = int(row0.x + 0.5);
+                    float intensity = row0.y;
+                    float travelled = row0.z * row0.w;
+                    vec3 offset = position - row1.xyz;
+                    float distances_sq = dot(offset, offset);
+                    float radius_limit = row1.w;
+                    vec3 color = row2.rgb;
+                    float spread = row2.w;
+                    float width = max(row3.x, 0.0001);
+                    float direction_hint = row3.y;
+                    float phase = row3.z;
+                    float envelope = 0.0;
+
+                    if (kind == 1) {
+                        float fill_radius = max(spread, travelled + spread);
+                        envelope = exp(-distances_sq / (2.0 * fill_radius * fill_radius));
+                    } else if (kind == 2) {
+                        float fill_radius = max(room_diagonal, travelled + spread);
+                        float local = exp(-distances_sq / (2.0 * fill_radius * fill_radius));
+                        float collapse = max(0.0, 1.0 - row0.w / max(0.2, width));
+                        envelope = max(local, 0.45 * collapse);
+                    } else if (kind == 3) {
+                        float distance = sqrt(distances_sq);
+                        float ring_width = max(spread * 0.45, width * 0.08);
+                        float ring_delta = distance - travelled;
+                        float ring = exp(-(ring_delta * ring_delta) / (2.0 * ring_width * ring_width));
+                        float room_flash = max(0.0, 1.0 - travelled / max(0.1, radius_limit)) * 0.32;
+                        if (abs(direction_hint) > 0.5) {
+                            float projection = offset.x * sign(direction_hint);
+                            float forward = clamp((projection / max(distance, 0.001) + 1.0) * 0.5, 0.0, 1.0);
+                            float gate = clamp(forward * 1.35, 0.0, 1.0);
+                            ring *= gate;
+                            room_flash *= 0.35 + 0.65 * gate;
+                        }
+                        envelope = max(ring, room_flash);
+                    } else if (kind == 4) {
+                        float span = max(max(room_width, room_depth), 0.1);
+                        float front = (travelled / max(0.1, radius_limit)) * span;
+                        if (direction_hint < 0.0) {
+                            front = span - front;
+                        }
+                        float sweep_width = max(0.12, width * 0.25);
+                        float delta = position.x - front;
+                        envelope = exp(-(delta * delta) / (2.0 * sweep_width * sweep_width));
+                    } else if (kind == 5) {
+                        float distance = sqrt(distances_sq);
+                        float head_delta = distance - travelled;
+                        float head = exp(-(head_delta * head_delta) / (2.0 * spread * spread));
+                        float tail_spread = spread * 2.2;
+                        float tail_delta = distance - max(0.0, travelled - spread * 3.0);
+                        float tail = exp(-(tail_delta * tail_delta) / (2.0 * tail_spread * tail_spread)) * 0.45;
+                        envelope = max(head, tail);
+                    } else if (kind == 6) {
+                        float noise = 0.65 + 0.35 * sin(position.x * 7.0 + position.z * 5.0 + row0.w * 18.0 + phase * 6.28);
+                        float local_spread = max(spread * 2.4, 0.1);
+                        envelope = exp(-distances_sq / (2.0 * local_spread * local_spread)) * noise;
+                    } else if (kind == 7) {
+                        float distance = sqrt(distances_sq);
+                        float ripple_base = sin(distance * 6.0 - row0.w * 4.0 + phase * 6.28);
+                        float ripple = 0.45 + 0.55 * ripple_base * ripple_base;
+                        float local_spread = max(spread * 5.0, 0.1);
+                        envelope = exp(-distances_sq / (2.0 * local_spread * local_spread)) * ripple;
+                    } else if (kind == 8) {
+                        float distance = sqrt(distances_sq);
+                        float turns = max(1.0, direction_hint);
+                        float spiral = 0.5 + 0.5 * sin(angle * 3.0 * turns + distance * 4.0 - row0.w * 6.0);
+                        float vortex_spread = spread * 2.5;
+                        float drift = distance - travelled * 0.45;
+                        envelope = exp(-(drift * drift) / (2.0 * vortex_spread * vortex_spread)) * spiral;
+                    } else if (kind == 9 || kind == 10 || kind == 11) {
+                        float local_spread = max(kind == 9 ? spread * 4.0 : spread, 0.1);
+                        envelope = exp(-distances_sq / (2.0 * local_spread * local_spread));
+                        if (kind == 10 && intensity >= 0.72) {
+                            float strobe = mod(floor(row0.w * 28.0 + phase * 7.0), 2.0) < 0.5 ? 1.0 : 0.0;
+                            envelope = max(envelope, strobe * intensity * 0.55);
+                        }
+                    } else {
+                        float distance = sqrt(distances_sq);
+                        float delta = distance - travelled;
+                        envelope = exp(-(delta * delta) / (2.0 * spread * spread));
+                    }
+
+                    float travel_fade = max(0.0, 1.0 - travelled / max(0.1, radius_limit));
+                    if (kind == 12) {
+                        accum -= vec3(envelope * intensity * 0.65);
+                    } else {
+                        accum += envelope * color * intensity * (0.2 + 0.8 * travel_fade);
+                    }
+                }
+                gl_FragColor = vec4(accum, 1.0);
+            }
+        """ % {"max_waves": self.MAX_GLES_WAVES}
+        self._program = self._ctx.program(vertex_shader=vertex_shader, fragment_shader=fragment_shader)
+        vertices = np.array([-1.0, -1.0, 3.0, -1.0, -1.0, 3.0], dtype=np.float32)
+        buffer = self._ctx.buffer(vertices.tobytes())
+        self._vertex_array = self._ctx.simple_vertex_array(self._program, buffer, "in_pos")
+        self._position_texture = self._ctx.texture((total, 1), 3, dtype="f4", data=self.topology.positions.astype(np.float32, copy=False).tobytes())
+        full_angles = np.zeros(total, dtype=np.float32)
+        full_angles[self._spatial_indices] = self._spatial_angles
+        self._angle_texture = self._ctx.texture((total, 1), 1, dtype="f4", data=full_angles.tobytes())
+        self._selection_texture = self._ctx.texture((total, 1), 1, dtype="f4")
+        self._wave_texture = self._ctx.texture((self.MAX_GLES_WAVES, 4), 4, dtype="f4")
+        self._output_texture = self._ctx.texture((total, 1), 4, dtype="f4")
+        self._framebuffer = self._ctx.framebuffer(color_attachments=[self._output_texture])
+        self._position_texture.use(0)
+        self._angle_texture.use(1)
+        self._selection_texture.use(2)
+        self._wave_texture.use(3)
+        self._program["position_tex"].value = 0
+        self._program["angle_tex"].value = 1
+        self._program["selection_tex"].value = 2
+        self._program["wave_tex"].value = 3
+        self._program["led_count"].value = float(total)
+        self._program["wave_tex_width"].value = float(self.MAX_GLES_WAVES)
+        self._program["room_diagonal"].value = float(self._room_diagonal)
+        self._program["room_width"].value = float(self.topology.spatial.room.width)
+        self._program["room_depth"].value = float(self.topology.spatial.room.depth)
+        self._program["wave_count"].value = 1
+        selection = np.ones(total, dtype=np.float32)
+        self._selection_texture.write(selection.tobytes())
+        waves = np.zeros((4, self.MAX_GLES_WAVES, 4), dtype=np.float32)
+        waves[0, 0] = (1.0, 1.0, 1.0, 0.1)
+        waves[1, 0] = (0.0, 0.0, 0.0, 10.0)
+        waves[2, 0] = (1.0, 0.0, 0.0, 0.5)
+        waves[3, 0] = (1.0, 0.0, 0.0, 0.0)
+        self._wave_texture.write(waves.tobytes())
+        self._framebuffer.use()
+        self._vertex_array.render(mode=self._ctx.TRIANGLES)
+        sample = np.frombuffer(self._framebuffer.read(components=4, dtype="f4"), dtype=np.float32)
+        if sample.size < 4 or float(np.max(sample.reshape(-1, 4)[:, 0])) <= 0.0:
+            raise RuntimeError("GLES renderer self-test failed")
+
+    def _render_spatial_waves(self, leds: np.ndarray, dt: float) -> None:
+        if self.topology.total == 0 or self._spatial_indices.size == 0:
+            return
+        spatial_idx, _, _, skipped = self._priority_render_selection()
+        self.last_spatial_priority_band_skips = skipped
+        if spatial_idx.size == 0:
+            return
+
+        active: list[SpatialLightWave] = []
+        for wave in self.waves:
+            wave.age += dt
+            wave.intensity *= wave.decay_rate ** (dt * 30.0)
+            travelled = wave.speed * wave.age
+            if wave.intensity < self.config.wave_min_intensity or travelled > wave.radius_limit + wave.spread * 3.0:
+                continue
+            active.append(wave)
+        self.waves = active
+        if not active:
+            return
+
+        if len(active) > self.MAX_GLES_WAVES:
+            active = sorted(active, key=lambda wave: wave.intensity, reverse=True)[: self.MAX_GLES_WAVES]
+            self.waves = active
+
+        selection = np.zeros(max(1, self.topology.total), dtype=np.float32)
+        selection[spatial_idx] = 1.0
+        wave_data = np.zeros((4, self.MAX_GLES_WAVES, 4), dtype=np.float32)
+        for index, wave in enumerate(active):
+            wave_data[0, index] = (_wave_kind_code(wave.kind), wave.intensity, wave.speed, wave.age)
+            wave_data[1, index] = (float(wave.origin[0]), float(wave.origin[1]), float(wave.origin[2]), wave.radius_limit)
+            wave_data[2, index] = (wave.color[0] / 255.0, wave.color[1] / 255.0, wave.color[2] / 255.0, wave.spread)
+            wave_data[3, index] = (wave.width, float(wave.direction_hint), wave.phase, 0.0)
+
+        assert self._ctx is not None
+        assert self._framebuffer is not None
+        assert self._selection_texture is not None
+        assert self._wave_texture is not None
+        assert self._program is not None
+        assert self._vertex_array is not None
+        self._selection_texture.write(selection.tobytes())
+        self._wave_texture.write(wave_data.tobytes())
+        self._program["wave_count"].value = len(active)
+        self._framebuffer.use()
+        self._ctx.clear(0.0, 0.0, 0.0, 0.0)
+        self._vertex_array.render(mode=self._ctx.TRIANGLES)
+
+        readback_started = time.perf_counter()
+        raw = self._framebuffer.read(components=4, dtype="f4")
+        self.last_readback_ms = (time.perf_counter() - readback_started) * 1000.0
+        self._readback = np.frombuffer(raw, dtype=np.float32).reshape(1, max(1, self.topology.total), 4)[0]
+        leds += self._readback[: self.topology.total, :3]
+
+
+def create_spatial_renderer(config: EngineConfig, topology: SpatialRoomTopology) -> SpatialRenderer:
+    requested = getattr(config, "spatial_renderer_backend", "auto")
+    candidates = ["gles", "numba", "numpy"] if requested == "auto" else [requested]
+    last_error = ""
+    for candidate in candidates:
+        try:
+            if candidate == "gles":
+                return GLESSpatialRenderer(config, topology)
+            if candidate == "numba":
+                return NumbaSpatialRenderer(config, topology)
+            if candidate == "numpy":
+                return VectorizedSpatialRenderer(config, topology)
+        except Exception as exc:
+            last_error = f"{candidate}: {exc}"
+            if requested != "auto":
+                renderer = VectorizedSpatialRenderer(config, topology)
+                renderer.render_backend_status = f"fallback from {last_error}"
+                return renderer
+    renderer = VectorizedSpatialRenderer(config, topology)
+    if last_error:
+        renderer.render_backend_status = f"fallback from {last_error}"
+    return renderer

@@ -65,7 +65,11 @@ class EventDetector:
 
         if self._effect_enabled("shockwave") and self._can_emit("shockwave", self._cooldown("shockwave", 10)) and self._is_shockwave(analysis):
             self._mark_emitted("shockwave")
-            events.append(LightEvent("top", min(1.0, analysis.changed_fraction * 1.4), analysis.dominant_color, "shockwave", color_velocity=analysis.color_velocity, effect_id="shockwave", width=0.22, duration=1.4))
+            direction_hint = self._shockwave_direction_hint(analysis)
+            edge = self._shockwave_origin_edge(analysis, direction_hint)
+            width = 0.22 if direction_hint else 0.55
+            intensity = min(1.0, analysis.changed_fraction * 1.15 + analysis.shockwave_line_strength * 0.35 + analysis.rate_of_change * 0.9)
+            events.append(LightEvent(edge, intensity, analysis.dominant_color, "shockwave", direction_hint=direction_hint, color_velocity=analysis.color_velocity, effect_id="shockwave", width=width, duration=1.4))
 
         if self._effect_enabled("explosion") and self._is_explosion(analysis):
             events.append(LightEvent("top", 1.0, analysis.dominant_color, "explosion", color_velocity=analysis.color_velocity, effect_id="explosion", width=2.0, duration=1.2))
@@ -237,17 +241,51 @@ class EventDetector:
 
     def _is_shockwave(self, analysis: MotionAnalysis) -> bool:
         broad_activity = self._broad_edge_activity(analysis)
+        line_like = (
+            analysis.shockwave_line_strength >= self._threshold("shockwave", 0.42)
+            and analysis.rate_of_change >= self._threshold("shockwave", 0.06)
+            and analysis.changed_fraction >= self._threshold("shockwave", 0.12)
+        )
+        circular_like = (
+            analysis.changed_fraction >= self._threshold("shockwave", self.config.flash_changed_fraction * 0.78)
+            and analysis.rate_of_change >= self._threshold("shockwave", 0.14)
+            and broad_activity >= self._threshold("shockwave", 0.24)
+            and (analysis.brightness >= self._threshold("shockwave", 0.50) or analysis.saturation >= self._threshold("shockwave", 0.45))
+        )
         impact_like = analysis.rate_of_change >= self._threshold("shockwave", 0.12) and (
             broad_activity >= self._threshold("shockwave", 0.20)
             or analysis.brightness >= self._threshold("shockwave", 0.58)
             or analysis.saturation >= self._threshold("shockwave", 0.50)
         )
+        diffuse_cut = (
+            analysis.shockwave_line_strength <= self._threshold("shockwave", 0.18)
+            and analysis.changed_fraction >= self._upper_threshold("shockwave", 0.64)
+            and broad_activity < self._threshold("shockwave", 0.32)
+        )
         ordinary_cut = analysis.color_velocity >= self._upper_threshold("shockwave", 0.52) and analysis.rate_of_change < self._threshold("shockwave", 0.18)
-        return (
+        legacy_impact = (
             analysis.changed_fraction >= self._threshold("shockwave", self.config.flash_changed_fraction * 0.82)
             and impact_like
-            and not ordinary_cut
         )
+        return (line_like or circular_like or legacy_impact) and not ordinary_cut and not diffuse_cut
+
+    def _shockwave_direction_hint(self, analysis: MotionAnalysis) -> int:
+        if analysis.shockwave_line_axis != "vertical" and analysis.shockwave_line_strength < self._threshold("shockwave", 0.46):
+            return 0
+        dx, dy = analysis.dominant_flow
+        if analysis.flow_confidence < self._threshold("shockwave", 0.10):
+            return 0
+        if abs(dx) < max(abs(dy) * 0.75, self._threshold("shockwave", 0.025)):
+            return 0
+        return 1 if dx > 0 else -1
+
+    @staticmethod
+    def _shockwave_origin_edge(_analysis: MotionAnalysis, direction_hint: int) -> str:
+        if direction_hint > 0:
+            return "left"
+        if direction_hint < 0:
+            return "right"
+        return "top"
 
     def _is_explosion(self, analysis: MotionAnalysis) -> bool:
         brightness_spike = analysis.brightness - self.previous_brightness

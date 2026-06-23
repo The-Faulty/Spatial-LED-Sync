@@ -54,6 +54,9 @@ class EffectSuiteTests(unittest.TestCase):
         self.assertEqual(config.wled_protocol, "ddp")
         self.assertEqual(config.wled_udp_port, 4048)
         self.assertEqual(config.motion_analysis_fps, 15)
+        self.assertEqual(config.optical_flow_fps, 15)
+        self.assertFalse(config.frame_difference_fill_enabled)
+        self.assertEqual(config.frame_difference_fill_fps, 0)
         self.assertTrue(config.parallel_runtime)
         self.assertEqual(config.tv_frame_queue_size, 1)
         self.assertEqual(config.analysis_queue_size, 1)
@@ -66,6 +69,7 @@ class EffectSuiteTests(unittest.TestCase):
         self.assertEqual(config.edge_band_fraction, 0.12)
         self.assertEqual(config.hybrid_full_width, 64)
         self.assertEqual(config.hybrid_full_height, 36)
+        self.assertTrue(config.variable_event_intensity)
 
     def test_invalid_wled_realtime_settings_fail_validation(self) -> None:
         config = EngineConfig()
@@ -78,6 +82,9 @@ class EffectSuiteTests(unittest.TestCase):
         config.effect_render_skip_policy = "drop_tv"
         config.spatial_priority_bands = 0
         config.spatial_far_budget_ratio = 1.4
+        config.optical_flow_fps = 0
+        config.frame_difference_fill_fps = -1
+        config.frame_difference_fill_enabled = "yes"  # type: ignore[assignment]
         errors = config.validate()
         self.assertTrue(any("wled_protocol" in error for error in errors))
         self.assertTrue(any("wled_udp_port" in error for error in errors))
@@ -88,6 +95,9 @@ class EffectSuiteTests(unittest.TestCase):
         self.assertTrue(any("effect_render_skip_policy" in error for error in errors))
         self.assertTrue(any("spatial_priority_bands" in error for error in errors))
         self.assertTrue(any("spatial_far_budget_ratio" in error for error in errors))
+        self.assertTrue(any("optical_flow_fps" in error for error in errors))
+        self.assertTrue(any("frame_difference_fill_fps" in error for error in errors))
+        self.assertTrue(any("frame_difference_fill_enabled" in error for error in errors))
 
     def test_invalid_render_mode_settings_fail_validation(self) -> None:
         config = EngineConfig()
@@ -147,6 +157,41 @@ class EffectSuiteTests(unittest.TestCase):
         self.assertFalse(engine._analysis_due())
         engine.last_analysis_time -= 1.0
         self.assertTrue(engine._analysis_due())
+
+    def test_hybrid_cadence_uses_frame_difference_between_optical_flow_passes(self) -> None:
+        config = EngineConfig(target_fps=60, motion_analysis_fps=60, optical_flow_fps=15, frame_difference_fill_enabled=True)
+        engine = HeadlessEffectsEngine(config, unittest.mock.Mock())
+        full = AnalysisRequirements(color_stats=True, frame_difference=True, edge_activity=True, top_corner_activity=True, optical_flow=True, retain_flow_debug=True)
+        first, first_fill = engine._requirements_for_due_analysis(full, now=10.0, advance=True)
+        self.assertEqual(first, full)
+        self.assertFalse(first_fill)
+        second, second_fill = engine._requirements_for_due_analysis(full, now=10.02, advance=True)
+        self.assertIsNotNone(second)
+        self.assertTrue(second_fill)
+        self.assertFalse(second.optical_flow)  # type: ignore[union-attr]
+        self.assertFalse(second.edge_activity)  # type: ignore[union-attr]
+        third, third_fill = engine._requirements_for_due_analysis(full, now=10.08, advance=True)
+        self.assertEqual(third, full)
+        self.assertFalse(third_fill)
+
+    def test_hybrid_cadence_without_fill_waits_for_optical_flow(self) -> None:
+        config = EngineConfig(target_fps=60, motion_analysis_fps=60, optical_flow_fps=15, frame_difference_fill_enabled=False)
+        engine = HeadlessEffectsEngine(config, unittest.mock.Mock())
+        full = AnalysisRequirements(color_stats=True, frame_difference=True, edge_activity=True, top_corner_activity=True, optical_flow=True, retain_flow_debug=True)
+        self.assertIsNotNone(engine._requirements_for_due_analysis(full, now=1.0, advance=True)[0])
+        pending, _ = engine._requirements_for_due_analysis(full, now=1.02, advance=False)
+        self.assertIsNone(pending)
+
+    def test_frame_difference_fill_filters_flow_only_events(self) -> None:
+        events = [
+            self.event("flash", 0.8),
+            self.event("shockwave", 0.7),
+            self.event("camera_pan", 0.9),
+            self.event("directional_sweep", 0.9),
+            self.event("energy_trail", 0.9),
+        ]
+        filtered = HeadlessEffectsEngine._filter_frame_difference_fill_events(events)
+        self.assertEqual([event.kind for event in filtered], ["flash", "shockwave"])
 
     def test_parallel_runtime_starts_renders_and_stops_workers(self) -> None:
         config = EngineConfig(
@@ -210,9 +255,11 @@ class EffectSuiteTests(unittest.TestCase):
         config = EngineConfig()
         config.ambient_side_spill_base_intensity = 1.2
         config.ambient_side_spill_boost_intensity = 2.4
+        config.variable_event_intensity = "yes"  # type: ignore[assignment]
         errors = config.validate()
         self.assertTrue(any("ambient_side_spill_base_intensity" in error for error in errors))
         self.assertTrue(any("ambient_side_spill_boost_intensity" in error for error in errors))
+        self.assertTrue(any("variable_event_intensity" in error for error in errors))
 
     def test_analysis_requirements_skip_unused_pipeline(self) -> None:
         ambient = EngineConfig(enabled_effects={key: key == "front_ambient" for key in DEFAULT_ENABLED_EFFECTS})
@@ -315,6 +362,62 @@ class EffectSuiteTests(unittest.TestCase):
         )
         kinds = {event.kind for event in detector.detect(impact)}
         self.assertIn("shockwave", kinds)
+
+    def test_shockwave_line_evidence_sets_direction_and_origin(self) -> None:
+        detector = EventDetector(EngineConfig())
+        analysis = MotionAnalysis(
+            brightness=0.62,
+            saturation=0.28,
+            changed_fraction=0.24,
+            rate_of_change=0.10,
+            shockwave_line_strength=0.72,
+            shockwave_line_axis="vertical",
+            dominant_flow=(0.18, 0.02),
+            flow_confidence=0.35,
+            dominant_color=(180, 210, 255),
+        )
+        shockwaves = [event for event in detector.detect(analysis) if event.kind == "shockwave"]
+        self.assertEqual(len(shockwaves), 1)
+        self.assertEqual(shockwaves[0].direction_hint, 1)
+        self.assertEqual(shockwaves[0].edge, "left")
+        self.assertLess(shockwaves[0].width, 0.5)
+
+    def test_circular_shockwave_still_triggers_without_line_evidence(self) -> None:
+        detector = EventDetector(EngineConfig())
+        analysis = MotionAnalysis(
+            brightness=0.72,
+            saturation=0.58,
+            changed_fraction=0.46,
+            rate_of_change=0.22,
+            shockwave_line_strength=0.0,
+            dominant_color=(220, 190, 120),
+            edge_activity={
+                "top": EdgeMotion(magnitude=0.45, confidence=0.5, toward_edge=0.4, coverage=0.30),
+                "left": EdgeMotion(magnitude=0.35, confidence=0.42, toward_edge=0.35, coverage=0.24),
+            },
+        )
+        shockwaves = [event for event in detector.detect(analysis) if event.kind == "shockwave"]
+        self.assertEqual(len(shockwaves), 1)
+        self.assertEqual(shockwaves[0].direction_hint, 0)
+        self.assertEqual(shockwaves[0].edge, "top")
+        self.assertGreaterEqual(shockwaves[0].width, 0.5)
+
+    def test_motion_detector_detects_narrow_shockwave_line_not_broad_flash(self) -> None:
+        detector = MotionDetector(EngineConfig())
+        req = AnalysisRequirements(color_stats=True, frame_difference=True, edge_activity=False, top_corner_activity=False, optical_flow=False, retain_flow_debug=False)
+        start = np.zeros((60, 100, 3), dtype=np.uint8)
+        line = start.copy()
+        line[:, 44:49] = (255, 255, 255)
+        detector.analyze(start, req)
+        line_analysis = detector.analyze(line, req)
+        self.assertGreater(line_analysis.shockwave_line_strength, 0.4)
+        self.assertEqual(line_analysis.shockwave_line_axis, "vertical")
+
+        broad = np.full((60, 100, 3), 255, dtype=np.uint8)
+        broad_detector = MotionDetector(EngineConfig())
+        broad_detector.analyze(start, req)
+        broad_analysis = broad_detector.analyze(broad, req)
+        self.assertLess(broad_analysis.shockwave_line_strength, 0.1)
 
     def test_high_energy_effects_are_more_separated(self) -> None:
         detector = EventDetector(EngineConfig())
@@ -513,6 +616,34 @@ class EffectSuiteTests(unittest.TestCase):
         after_by_kind = {wave.kind: wave.intensity for wave in renderer.waves}
         self.assertLess(after_by_kind["spill"], before[0])
         self.assertGreaterEqual(after_by_kind["shockwave"], 0.89)
+
+    def test_variable_event_intensity_can_be_disabled_for_renderers(self) -> None:
+        low = self.event("shockwave", 0.25)
+        wave_config = EngineConfig(total_leds=24)
+        wave = WaveEngine(wave_config, RoomTopology(wave_config))
+        wave.add_events([low])
+        self.assertLess(max(item.intensity for item in wave.waves), 1.0)
+
+        fixed_config = EngineConfig(total_leds=24, variable_event_intensity=False)
+        fixed = WaveEngine(fixed_config, RoomTopology(fixed_config))
+        fixed.add_events([low])
+        self.assertAlmostEqual(max(item.intensity for item in fixed.waves), 1.0)
+
+        spatial_config_fixed = EngineConfig(total_leds=12, spatial=spatial_config(), variable_event_intensity=False)
+        spatial_renderer = VectorizedSpatialRenderer(spatial_config_fixed, SpatialRoomTopology(spatial_config_fixed))
+        spatial_renderer.add_events([low])
+        self.assertAlmostEqual(max(wave.intensity for wave in spatial_renderer.waves), 1.0)
+
+    def test_directed_legacy_shockwave_uses_single_direction(self) -> None:
+        config = EngineConfig(total_leds=24)
+        engine = WaveEngine(config, RoomTopology(config))
+        engine.add_events([self.event("shockwave", 0.8, edge="left", direction_hint=1, width=0.22)])
+        self.assertEqual(len(engine.waves), 1)
+        self.assertEqual(engine.waves[0].direction, 1)
+
+        circular = WaveEngine(config, RoomTopology(config))
+        circular.add_events([self.event("shockwave", 0.8, direction_hint=0, width=0.55)])
+        self.assertEqual(len(circular.waves), 2)
 
     def test_high_energy_spatial_effects_fill_room(self) -> None:
         config = EngineConfig(total_leds=12, spatial=spatial_config(), brightness=1.0, gamma=1.0, color_smoothing=0.0)

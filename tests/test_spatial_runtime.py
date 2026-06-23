@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import unittest
 import unittest.mock
+from dataclasses import replace
 
 import numpy as np
 
 from config import EngineConfig
 from event_detector import LightEvent
 from spatial_config import parse_spatial_config, spatial_config_to_dict, default_spatial_dict, validate_spatial_config
-from spatial_renderer import VectorizedSpatialRenderer
+from spatial_renderer import NumbaSpatialRenderer, VectorizedSpatialRenderer, create_spatial_renderer
 from spatial_topology import SpatialRoomTopology
 from wled_output import WLEDOutput
 
@@ -126,6 +127,47 @@ class SpatialRuntimeTests(unittest.TestCase):
         leds = renderer.step(0.1)
         self.assertEqual(leds.shape, (8, 3))
         self.assertGreater(int(leds.max()), 0)
+        self.assertEqual(renderer.render_backend, "numpy")
+
+    def test_spatial_renderer_backend_config_validation(self) -> None:
+        config = EngineConfig(total_leds=8, spatial=spatial_config(), spatial_renderer_backend="numba")
+        self.assertFalse(any("spatial_renderer_backend" in error for error in config.validate()))
+        config.spatial_renderer_backend = "bogus"
+        self.assertTrue(any("spatial_renderer_backend" in error for error in config.validate()))
+
+    def test_spatial_renderer_factory_uses_numpy_backend(self) -> None:
+        config = EngineConfig(total_leds=8, spatial=spatial_config(), spatial_renderer_backend="numpy", brightness=1.0, color_smoothing=0.0)
+        renderer = create_spatial_renderer(config, SpatialRoomTopology(config))
+        renderer.add_events([LightEvent(edge="top", intensity=1.0, color=(255, 80, 20), kind="explosion")])
+        leds = renderer.step(0.1)
+        self.assertEqual(getattr(renderer, "render_backend"), "numpy")
+        self.assertEqual(leds.shape, (8, 3))
+
+    def test_spatial_renderer_factory_falls_back_when_forced_gles_fails(self) -> None:
+        config = EngineConfig(total_leds=8, spatial=spatial_config(), spatial_renderer_backend="gles")
+        with unittest.mock.patch("spatial_renderer.GLESSpatialRenderer", side_effect=RuntimeError("no context")):
+            renderer = create_spatial_renderer(config, SpatialRoomTopology(config))
+        self.assertEqual(getattr(renderer, "render_backend"), "numpy")
+        self.assertIn("fallback", getattr(renderer, "render_backend_status"))
+
+    def test_numba_renderer_matches_numpy_for_fixed_scene_when_available(self) -> None:
+        if not NumbaSpatialRenderer.available():
+            self.skipTest("numba is not installed")
+        config = EngineConfig(total_leds=8, spatial=spatial_config(), brightness=1.0, gamma=1.0, saturation=1.0, color_smoothing=0.0)
+        topology = SpatialRoomTopology(config)
+        numpy_renderer = VectorizedSpatialRenderer(config, topology)
+        numba_renderer = NumbaSpatialRenderer(config, topology)
+        events = [
+            LightEvent(edge="top", intensity=1.0, color=(255, 80, 20), kind="explosion"),
+            LightEvent(edge="left", intensity=0.8, color=(20, 180, 255), kind="shockwave"),
+            LightEvent(edge="right", intensity=0.7, color=(120, 40, 255), kind="portal_vortex"),
+            LightEvent(edge="top", intensity=0.6, color=(0, 0, 0), kind="negative_wave"),
+        ]
+        numpy_renderer.add_events(events)
+        numba_renderer.waves = [replace(wave) for wave in numpy_renderer.waves]
+        numpy_leds = numpy_renderer.step(0.05)
+        numba_leds = numba_renderer.step(0.05)
+        self.assertLessEqual(int(np.max(np.abs(numpy_leds.astype(np.int16) - numba_leds.astype(np.int16)))), 3)
 
     def test_spatial_priority_budget_renders_near_tv_leds_first(self) -> None:
         config = EngineConfig(total_leds=8, spatial=spatial_config(), brightness=1.0, gamma=1.0, color_smoothing=0.0, spatial_priority_bands=2)

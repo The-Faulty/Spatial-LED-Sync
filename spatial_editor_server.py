@@ -51,6 +51,8 @@ class PreviewRuntimeManager:
                 config.simulate_input = simulate_input
             config.send_to_wled = False
             config.debug = False
+            if getattr(config, "spatial_renderer_backend", "auto") == "auto":
+                config.spatial_renderer_backend = "numpy"
             logger = logging.getLogger("spatial_editor.preview")
             logger.addHandler(logging.NullHandler())
             self.runtime = HeadlessEffectsEngine(copy.deepcopy(config), logger)
@@ -127,6 +129,7 @@ class PreviewRuntimeManager:
             tv_image_blur = 0
             ambient_side_spill_base_intensity = 0.45
             ambient_side_spill_boost_intensity = 1.0
+            variable_event_intensity = True
             active_effect_counts: dict[str, int] = {}
             runtime = self.runtime
             if runtime is not None:
@@ -136,6 +139,7 @@ class PreviewRuntimeManager:
                 tv_image_blur = runtime.config.tv_image_blur
                 ambient_side_spill_base_intensity = runtime.config.ambient_side_spill_base_intensity
                 ambient_side_spill_boost_intensity = runtime.config.ambient_side_spill_boost_intensity
+                variable_event_intensity = runtime.config.variable_event_intensity
                 renderer = runtime.wave_engine
                 waves = getattr(renderer, "waves", []) if renderer is not None else []
                 for wave in waves:
@@ -150,6 +154,7 @@ class PreviewRuntimeManager:
                 tv_image_blur = config.tv_image_blur
                 ambient_side_spill_base_intensity = config.ambient_side_spill_base_intensity
                 ambient_side_spill_boost_intensity = config.ambient_side_spill_boost_intensity
+                variable_event_intensity = config.variable_event_intensity
             triggered = [
                 {
                     "kind": event.kind,
@@ -182,6 +187,7 @@ class PreviewRuntimeManager:
                 "tv_image_blur": tv_image_blur,
                 "ambient_side_spill_base_intensity": ambient_side_spill_base_intensity,
                 "ambient_side_spill_boost_intensity": ambient_side_spill_boost_intensity,
+                "variable_event_intensity": variable_event_intensity,
                 "buffered_frames": snapshot.buffered_frames,
                 "hyperhdr_connected": snapshot.hyperhdr_connected,
                 "wled_enabled": False,
@@ -300,6 +306,8 @@ class SpatialEditorHandler(BaseHTTPRequestHandler):
                 except (TypeError, ValueError):
                     self._send_json({"ok": False, "errors": [f"{field} must be a number"]}, status=400)
                     return
+        if "variable_event_intensity" in payload:
+            config.variable_event_intensity = bool(payload["variable_event_intensity"])
         if "tv_image_blur" in payload:
             try:
                 config.tv_image_blur = int(payload["tv_image_blur"])
@@ -308,13 +316,15 @@ class SpatialEditorHandler(BaseHTTPRequestHandler):
                 return
         if "render_mode" in payload:
             config.render_mode = str(payload["render_mode"])
-        for field in ("target_fps", "wled_fps"):
+        for field in ("target_fps", "wled_fps", "optical_flow_fps", "frame_difference_fill_fps"):
             if field in payload:
                 try:
                     setattr(config, field, int(payload[field]))
                 except (TypeError, ValueError):
                     self._send_json({"ok": False, "errors": [f"{field} must be an integer"]}, status=400)
                     return
+        if "frame_difference_fill_enabled" in payload:
+            config.frame_difference_fill_enabled = bool(payload["frame_difference_fill_enabled"])
         for field in ("edge_band_width", "edge_band_height", "hybrid_full_width", "hybrid_full_height"):
             if field in payload:
                 try:
@@ -399,6 +409,8 @@ class SpatialEditorHandler(BaseHTTPRequestHandler):
                 except (TypeError, ValueError):
                     self._send_json({"ok": False, "errors": [f"{field} must be a number"]}, status=400)
                     return
+        if "variable_event_intensity" in payload:
+            config.variable_event_intensity = bool(payload["variable_event_intensity"])
         if "tv_image_blur" in payload:
             try:
                 config.tv_image_blur = int(payload["tv_image_blur"])
@@ -420,6 +432,7 @@ class SpatialEditorHandler(BaseHTTPRequestHandler):
                 "tv_image_blur": config.tv_image_blur,
                 "ambient_side_spill_base_intensity": config.ambient_side_spill_base_intensity,
                 "ambient_side_spill_boost_intensity": config.ambient_side_spill_boost_intensity,
+                "variable_event_intensity": config.variable_event_intensity,
             }
         )
 
@@ -434,6 +447,12 @@ class SpatialEditorHandler(BaseHTTPRequestHandler):
             runtime.config.tv_image_blur = config.tv_image_blur
             runtime.config.ambient_side_spill_base_intensity = config.ambient_side_spill_base_intensity
             runtime.config.ambient_side_spill_boost_intensity = config.ambient_side_spill_boost_intensity
+            runtime.config.variable_event_intensity = config.variable_event_intensity
+            runtime.config.target_fps = config.target_fps
+            runtime.config.wled_fps = config.wled_fps
+            runtime.config.optical_flow_fps = config.optical_flow_fps
+            runtime.config.frame_difference_fill_enabled = config.frame_difference_fill_enabled
+            runtime.config.frame_difference_fill_fps = config.frame_difference_fill_fps
             if runtime.event_detector is not None:
                 runtime.event_detector.config.enabled_effects.update(config.enabled_effects)
                 runtime.event_detector.config.effect_sensitivity.update(config.effect_sensitivity)
@@ -441,6 +460,10 @@ class SpatialEditorHandler(BaseHTTPRequestHandler):
                 runtime.event_detector.config.tv_image_blur = config.tv_image_blur
                 runtime.event_detector.config.ambient_side_spill_base_intensity = config.ambient_side_spill_base_intensity
                 runtime.event_detector.config.ambient_side_spill_boost_intensity = config.ambient_side_spill_boost_intensity
+                runtime.event_detector.config.variable_event_intensity = config.variable_event_intensity
+                runtime.event_detector.config.optical_flow_fps = config.optical_flow_fps
+                runtime.event_detector.config.frame_difference_fill_enabled = config.frame_difference_fill_enabled
+                runtime.event_detector.config.frame_difference_fill_fps = config.frame_difference_fill_fps
             renderer = runtime.wave_engine
             if renderer is None:
                 return

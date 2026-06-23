@@ -1,0 +1,15 @@
+[Unit]
+Description=Ambilight Effects headless engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/Ambilight-Effects
+ExecStart=/opt/Ambilight-Effects/.venv/bin/python main.py --config config.json --no-debug --profile pi_zero --overload-policy adaptive_quality
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

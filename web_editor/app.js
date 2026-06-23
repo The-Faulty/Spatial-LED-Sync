@@ -102,6 +102,9 @@ const fields = {
   previewStatus: document.querySelector("#preview-status"),
   targetFps: document.querySelector("#target-fps"),
   wledFps: document.querySelector("#wled-fps"),
+  opticalFlowFps: document.querySelector("#optical-flow-fps"),
+  frameDifferenceFillEnabled: document.querySelector("#frame-difference-fill-enabled"),
+  frameDifferenceFillFps: document.querySelector("#frame-difference-fill-fps"),
   renderMode: document.querySelector("#render-mode"),
   edgeBandWidth: document.querySelector("#edge-band-width"),
   edgeBandHeight: document.querySelector("#edge-band-height"),
@@ -110,6 +113,7 @@ const fields = {
   hybridFullHeight: document.querySelector("#hybrid-full-height"),
   effectToggles: document.querySelector("#effect-toggles"),
   effectSensitivity: document.querySelector("#effect-sensitivity"),
+  variableEventIntensity: document.querySelector("#variable-event-intensity"),
   ambientSideSpillBase: document.querySelector("#ambient-side-spill-base-intensity"),
   ambientSideSpillBaseValue: document.querySelector("#ambient-side-spill-base-value"),
   ambientSideSpillBoost: document.querySelector("#ambient-side-spill-boost-intensity"),
@@ -269,6 +273,19 @@ function syncEffectSensitivityControls() {
     const display = slider.parentElement?.querySelector(".effect-sensitivity-value");
     if (display) display.textContent = value.toFixed(2);
   }
+  if (fields.variableEventIntensity && config) {
+    fields.variableEventIntensity.checked = config.variable_event_intensity !== false;
+    fields.variableEventIntensity.disabled = effectSaveInFlight;
+  }
+}
+
+function bindVariableEventIntensity() {
+  if (!fields.variableEventIntensity) return;
+  fields.variableEventIntensity.addEventListener("change", () => {
+    config.variable_event_intensity = fields.variableEventIntensity.checked;
+    pendingAmbientSpillSettings.variable_event_intensity = fields.variableEventIntensity.checked;
+    scheduleEffectSave();
+  });
 }
 
 function syncAmbientSpillControls() {
@@ -392,6 +409,7 @@ async function saveEffectToggles() {
   config.ambient_side_spill_base_intensity = payload.ambient_side_spill_base_intensity ?? config.ambient_side_spill_base_intensity;
   config.ambient_side_spill_boost_intensity = payload.ambient_side_spill_boost_intensity ?? config.ambient_side_spill_boost_intensity;
   config.tv_image_blur = payload.tv_image_blur ?? config.tv_image_blur;
+  config.variable_event_intensity = payload.variable_event_intensity ?? config.variable_event_intensity;
   syncEffectToggleControls();
   syncAmbientSpillControls();
   statusEl.textContent = "Effects updated";
@@ -436,6 +454,10 @@ function updateLiveEffects(payload) {
     if (payload.ambient_side_spill_boost_intensity !== undefined) {
       config.ambient_side_spill_boost_intensity = pendingAmbientSpillSettings.ambient_side_spill_boost_intensity ?? payload.ambient_side_spill_boost_intensity;
     }
+    if (payload.variable_event_intensity !== undefined) {
+      config.variable_event_intensity = pendingAmbientSpillSettings.variable_event_intensity ?? payload.variable_event_intensity;
+    }
+    syncEffectSensitivityControls();
     syncAmbientSpillControls();
   }
   const triggered = Array.isArray(payload.triggered_effects)
@@ -499,6 +521,9 @@ function bindRenderPerformance() {
   if (!config) return;
   fields.targetFps.value = config.target_fps ?? 90;
   fields.wledFps.value = config.wled_fps ?? 90;
+  fields.opticalFlowFps.value = config.optical_flow_fps ?? 15;
+  fields.frameDifferenceFillEnabled.checked = Boolean(config.frame_difference_fill_enabled);
+  fields.frameDifferenceFillFps.value = config.frame_difference_fill_fps ?? 0;
   fields.renderMode.value = config.render_mode || "full_frame";
   fields.edgeBandWidth.value = config.edge_band_width ?? 192;
   fields.edgeBandHeight.value = config.edge_band_height ?? 108;
@@ -511,6 +536,9 @@ function readRenderPerformanceForm() {
   config.render_mode = fields.renderMode.value || "full_frame";
   config.target_fps = Math.max(1, Math.min(90, Math.round(number(fields.targetFps.value, config.target_fps ?? 90))));
   config.wled_fps = Math.max(1, Math.min(90, Math.round(number(fields.wledFps.value, config.wled_fps ?? 90))));
+  config.optical_flow_fps = Math.max(1, Math.min(90, Math.round(number(fields.opticalFlowFps.value, config.optical_flow_fps ?? 15))));
+  config.frame_difference_fill_enabled = Boolean(fields.frameDifferenceFillEnabled.checked);
+  config.frame_difference_fill_fps = Math.max(0, Math.min(90, Math.round(number(fields.frameDifferenceFillFps.value, config.frame_difference_fill_fps ?? 0))));
   config.edge_band_width = Math.max(8, Math.round(number(fields.edgeBandWidth.value, config.edge_band_width ?? 192)));
   config.edge_band_height = Math.max(8, Math.round(number(fields.edgeBandHeight.value, config.edge_band_height ?? 108)));
   config.edge_band_fraction = Math.max(0.01, Math.min(0.5, number(fields.edgeBandFraction.value, config.edge_band_fraction ?? 0.12)));
@@ -1340,8 +1368,12 @@ async function saveSpatialConfig({ silent = false } = {}) {
       ambient_side_spill_base_intensity: pendingAmbientSpillSettings.ambient_side_spill_base_intensity ?? config.ambient_side_spill_base_intensity,
       ambient_side_spill_boost_intensity: pendingAmbientSpillSettings.ambient_side_spill_boost_intensity ?? config.ambient_side_spill_boost_intensity,
       tv_image_blur: pendingAmbientSpillSettings.tv_image_blur ?? config.tv_image_blur,
+      variable_event_intensity: pendingAmbientSpillSettings.variable_event_intensity ?? config.variable_event_intensity,
       target_fps: config.target_fps,
       wled_fps: config.wled_fps,
+      optical_flow_fps: config.optical_flow_fps,
+      frame_difference_fill_enabled: config.frame_difference_fill_enabled,
+      frame_difference_fill_fps: config.frame_difference_fill_fps,
       render_mode: config.render_mode,
       edge_band_width: config.edge_band_width,
       edge_band_height: config.edge_band_height,
@@ -1615,10 +1647,14 @@ fields.startSimulation.addEventListener("click", startSimulation);
 fields.stopSimulation.addEventListener("click", stopSimulation);
 fields.stopPattern.addEventListener("click", () => triggerPreviewPattern("idle"));
 bindAmbientSpillControls();
+bindVariableEventIntensity();
 for (const input of [
   fields.renderMode,
   fields.targetFps,
   fields.wledFps,
+  fields.opticalFlowFps,
+  fields.frameDifferenceFillEnabled,
+  fields.frameDifferenceFillFps,
   fields.edgeBandWidth,
   fields.edgeBandHeight,
   fields.edgeBandFraction,

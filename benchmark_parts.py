@@ -56,6 +56,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-waves", type=int, default=None, help="Override max active waves for renderer stress cases")
     parser.add_argument("--wave-count", type=int, default=None, help="Override wave count for stress and ceiling modes")
     parser.add_argument("--worst-waves", type=int, default=None, help="Legacy alias for --wave-count")
+    parser.add_argument("--spatial-renderer-backend", choices=["auto", "numpy", "numba", "gles"], default=None, help="Renderer backend for spatial benchmark cases")
+    parser.add_argument("--renderer-matrix", action="store_true", help="Benchmark renderer-only cases for 240/1300/2000 LEDs and 20/50 waves")
+    parser.add_argument("--backend-comparison", action="store_true", help="Run renderer matrix for numpy, numba, and gles and print a backend comparison table")
+    parser.add_argument("--probe-backends", action="store_true", help="Probe spatial renderer backends and print exact initialization failures")
     parser.add_argument("--json", action="store_true", help="Print JSON only")
     return parser.parse_args()
 
@@ -100,6 +104,14 @@ def make_config(path: str, profile: str, led_count: int) -> EngineConfig:
     config.spatial = spatial_config(led_count)
     apply_runtime_profile(config)
     return config
+
+
+def renderer_backend_name(renderer: object) -> str:
+    return str(getattr(renderer, "render_backend", "unknown"))
+
+
+def renderer_backend_status(renderer: object) -> str:
+    return str(getattr(renderer, "render_backend_status", "unknown"))
 
 
 def time_case(name: str, seconds: float, warmup: int, min_iterations: int, fn: Callable[[], object]) -> BenchResult:
@@ -259,6 +271,15 @@ def build_cases(config: EngineConfig) -> list[tuple[str, Callable[[], object]]]:
         reset_waves(renderer, active_seed_waves)
         return renderer_step(renderer)
 
+    hybrid60_tick = {"count": 0}
+    hybrid90_tick = {"count": 0}
+
+    def hybrid_expected_frame(flow_every: int, state: dict[str, int]) -> MotionAnalysis:
+        state["count"] += 1
+        if flow_motion is not None and state["count"] % flow_every == 1:
+            return flow_motion.analyze(prepared_next, AnalysisRequirements(color_stats=True, frame_difference=True, edge_activity=True, top_corner_activity=True, optical_flow=True, retain_flow_debug=False))
+        return diff_motion.analyze(prepared_next, AnalysisRequirements(color_stats=True, frame_difference=True, edge_activity=False, top_corner_activity=False, optical_flow=False, retain_flow_debug=False))
+
     cases: list[tuple[str, Callable[[], object]]] = [
         ("frame.prepare", lambda: processor.prepare(raw)),
         ("frame.prepare_render_frames", lambda: processor.prepare_render_frames(raw)),
@@ -276,6 +297,8 @@ def build_cases(config: EngineConfig) -> list[tuple[str, Callable[[], object]]]:
     ]
     if flow_motion is not None:
         cases.insert(7, ("motion.optical_flow", lambda: flow_motion.analyze(prepared_next, AnalysisRequirements(color_stats=True, frame_difference=True, edge_activity=True, top_corner_activity=True, optical_flow=True, retain_flow_debug=False))))
+        cases.insert(8, ("motion.hybrid_expected_frame_60fps", lambda: hybrid_expected_frame(4, hybrid60_tick)))
+        cases.insert(9, ("motion.hybrid_expected_frame_90fps", lambda: hybrid_expected_frame(6, hybrid90_tick)))
     return cases
 
 
@@ -303,6 +326,16 @@ def build_worst_cases(config: EngineConfig, wave_count: int, prefix: str) -> lis
     flow_config.motion_algorithm = "optical_flow" if use_optical_flow else "frame_difference"
     complex_motion = MotionDetector(flow_config)
     complex_motion.analyze(prepared_a, requirements)
+    diff_requirements = AnalysisRequirements(
+        color_stats=True,
+        frame_difference=True,
+        edge_activity=False,
+        top_corner_activity=False,
+        optical_flow=False,
+        retain_flow_debug=False,
+    )
+    diff_motion = MotionDetector(config)
+    diff_motion.analyze(prepared_a, diff_requirements)
 
     detector = EventDetector(config)
     mixer = EventMixer()
@@ -354,7 +387,7 @@ def build_worst_cases(config: EngineConfig, wave_count: int, prefix: str) -> lis
         pipeline_renderer.add_events(mixed)
         return pipeline_renderer.step(1.0 / 60.0)
 
-    def wled_ddp_payload_2000() -> object:
+    def wled_ddp_payload_large() -> object:
         return wled._send_ddp(config.wled_ip or "192.0.2.1", payload_leds)
 
     cases: list[tuple[str, Callable[[], object]]] = [
@@ -362,15 +395,157 @@ def build_worst_cases(config: EngineConfig, wave_count: int, prefix: str) -> lis
         (f"{prefix}.frame.prepare_render_frames_complex", lambda: processor.prepare_render_frames(raw_b)),
         (f"{prefix}.event.detect_heavy_analysis", lambda: detector.detect(heavy_analysis)),
         (f"{prefix}.event.mix_many_candidates", lambda: mixer.mix(heavy_events * 8)),
-        (f"{prefix}.renderer.spatial_{config.max_active_waves}_waves_2000_leds", lambda: refill(spatial_max)),
-        (f"{prefix}.wled.ddp_payload_2000_leds", wled_ddp_payload_2000),
+        (f"{prefix}.renderer.spatial_{config.max_active_waves}_waves_{config.total_leds}_leds", lambda: refill(spatial_max)),
+        (f"{prefix}.wled.ddp_payload_{config.total_leds}_leds", wled_ddp_payload_large),
         (f"{prefix}.pipeline.prepare_analyze_detect_mix", prepare_analyze_detect_mix),
         (f"{prefix}.pipeline.render_after_detect", render_after_detect),
         (f"{prefix}.pipeline.total_with_render", full_frame_pipeline),
     ]
     motion_name = f"{prefix}.motion.full_optical_flow_debug" if use_optical_flow else f"{prefix}.motion.edge_frame_difference"
     cases.insert(2, (motion_name, lambda: complex_motion.analyze(prepared_b, requirements)))
+    cases.insert(3, (f"{prefix}.motion.frame_difference_fill", lambda: diff_motion.analyze(prepared_b, diff_requirements)))
     return cases
+
+
+def build_renderer_matrix_cases(config_path: str, config: EngineConfig, profile: str) -> list[tuple[str, Callable[[], object]]]:
+    cases: list[tuple[str, Callable[[], object]]] = []
+    for led_count in (240, 1300, 2000):
+        for wave_count in (20, 50):
+            case_config = make_config(config_path, profile, led_count)
+            case_config.spatial_renderer_backend = config.spatial_renderer_backend
+            case_config.max_active_waves = wave_count
+            topology = SpatialRoomTopology(case_config)
+            renderer = create_effect_renderer(case_config, topology)
+            renderer.set_tv_frame(None)
+            repeats = max(1, (wave_count // len(worst_event_set())) + 1)
+            renderer.add_events((worst_event_set() * repeats)[:wave_count])
+            seed = clone_waves(renderer)
+            name = f"renderer.matrix.{renderer_backend_name(renderer)}_{wave_count}_waves_{led_count}_leds"
+
+            def make_case(target: object = renderer, waves: list[object] = seed) -> Callable[[], object]:
+                def run() -> object:
+                    reset_waves(target, waves)
+                    result = renderer_step(target)
+                    return {
+                        "leds": result,
+                        "backend": renderer_backend_name(target),
+                        "backend_status": renderer_backend_status(target),
+                        "render_ms": float(getattr(target, "last_render_ms", 0.0)),
+                        "readback_ms": float(getattr(target, "last_readback_ms", 0.0)),
+                    }
+
+                return run
+
+            cases.append((name, make_case()))
+    return cases
+
+
+def parse_matrix_name(name: str) -> tuple[str, str]:
+    prefix = "renderer.matrix."
+    if not name.startswith(prefix):
+        return "unknown", name
+    parts = name[len(prefix) :].split("_", 1)
+    if len(parts) != 2:
+        return "unknown", name
+    return parts[0], parts[1]
+
+
+def speedup(base_ms: float, candidate_ms: float) -> float | None:
+    if base_ms <= 0.0 or candidate_ms <= 0.0:
+        return None
+    return round(base_ms / candidate_ms, 2)
+
+
+def run_backend_comparison(args: argparse.Namespace, base_config: EngineConfig) -> dict:
+    requested_backends = ["numpy", "numba", "gles"]
+    all_results: list[dict] = []
+    by_case: dict[str, dict[str, BenchResult]] = {}
+    actual_by_case: dict[str, dict[str, str]] = {}
+    for requested in requested_backends:
+        case_config = EngineConfig.from_dict(base_config.to_dict())
+        case_config.spatial_renderer_backend = requested
+        cases = build_renderer_matrix_cases(args.config, case_config, args.profile)
+        results = [time_case(name, max(0.05, args.seconds), args.warmup, args.min_iterations, fn) for name, fn in cases]
+        for result in results:
+            actual, case_name = parse_matrix_name(result.name)
+            by_case.setdefault(case_name, {})[requested] = result
+            actual_by_case.setdefault(case_name, {})[requested] = actual
+            row = dict(result.__dict__)
+            row["requested_backend"] = requested
+            row["actual_backend"] = actual
+            row["case"] = case_name
+            all_results.append(row)
+
+    comparison_rows: list[dict] = []
+    for case_name in sorted(by_case.keys(), key=lambda value: (int(value.split("_waves_")[1].split("_leds")[0]), int(value.split("_waves_")[0])) if "_waves_" in value else (0, 0)):
+        results = by_case[case_name]
+        numpy_result = results.get("numpy")
+        row = {
+            "case": case_name,
+            "numpy_ms": numpy_result.avg_ms if numpy_result else None,
+            "numba_ms": results["numba"].avg_ms if "numba" in results else None,
+            "gles_ms": results["gles"].avg_ms if "gles" in results else None,
+            "gles_actual_backend": actual_by_case.get(case_name, {}).get("gles", "unknown"),
+            "numba_speedup": speedup(numpy_result.avg_ms, results["numba"].avg_ms) if numpy_result and "numba" in results else None,
+            "gles_speedup": speedup(numpy_result.avg_ms, results["gles"].avg_ms) if numpy_result and "gles" in results else None,
+        }
+        comparison_rows.append(row)
+
+    return {
+        "requested_backends": requested_backends,
+        "results": all_results,
+        "comparison": comparison_rows,
+    }
+
+
+def print_backend_comparison(comparison_rows: list[dict]) -> None:
+    print("Backend comparison (average ms)")
+    print(f"{'Case':30} {'NumPy':>9} {'Numba':>9} {'GLES':>9} {'Numba x':>9} {'GLES x':>9} {'GLES actual':>12}")
+    for row in comparison_rows:
+        numpy_ms = f"{row['numpy_ms']:.4f}" if row["numpy_ms"] is not None else "-"
+        numba_ms = f"{row['numba_ms']:.4f}" if row["numba_ms"] is not None else "-"
+        gles_ms = f"{row['gles_ms']:.4f}" if row["gles_ms"] is not None else "-"
+        numba_x = f"{row['numba_speedup']:.2f}x" if row["numba_speedup"] is not None else "-"
+        gles_x = f"{row['gles_speedup']:.2f}x" if row["gles_speedup"] is not None else "-"
+        print(f"{row['case']:30} {numpy_ms:>9} {numba_ms:>9} {gles_ms:>9} {numba_x:>9} {gles_x:>9} {row['gles_actual_backend']:>12}")
+
+
+def probe_backends(config: EngineConfig) -> list[dict]:
+    from spatial_renderer import GLESSpatialRenderer, NumbaSpatialRenderer, VectorizedSpatialRenderer
+
+    probes: list[dict] = []
+    topology = SpatialRoomTopology(config)
+    for name, renderer_type in (
+        ("numpy", VectorizedSpatialRenderer),
+        ("numba", NumbaSpatialRenderer),
+        ("gles", GLESSpatialRenderer),
+    ):
+        try:
+            renderer = renderer_type(config, topology)
+            probes.append({
+                "backend": name,
+                "ok": True,
+                "actual_backend": getattr(renderer, "render_backend", "unknown"),
+                "status": getattr(renderer, "render_backend_status", "unknown"),
+                "error": "",
+            })
+        except Exception as exc:
+            probes.append({
+                "backend": name,
+                "ok": False,
+                "actual_backend": "",
+                "status": "",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+    return probes
+
+
+def print_backend_probes(probes: list[dict]) -> None:
+    print("Backend probe")
+    print(f"{'Backend':10} {'OK':>5} {'Actual':>10}  Status / Error")
+    for probe in probes:
+        status = probe["status"] if probe["ok"] else probe["error"]
+        print(f"{probe['backend']:10} {str(probe['ok']):>5} {probe['actual_backend']:>10}  {status}")
 
 
 def main() -> int:
@@ -380,10 +555,22 @@ def main() -> int:
     config = make_config(args.config, args.profile, led_count)
     if args.render_mode is not None:
         config.render_mode = args.render_mode
+    if args.spatial_renderer_backend is not None:
+        config.spatial_renderer_backend = args.spatial_renderer_backend
     if args.max_waves is not None:
         config.max_active_waves = max(1, int(args.max_waves))
     wave_override = args.wave_count if args.wave_count is not None else args.worst_waves
-    if mode == "stress":
+    backend_comparison: dict | None = None
+    backend_probes: list[dict] | None = None
+    if args.probe_backends:
+        backend_probes = probe_backends(config)
+        cases = []
+    elif args.backend_comparison:
+        backend_comparison = run_backend_comparison(args, config)
+        cases = []
+    elif args.renderer_matrix:
+        cases = build_renderer_matrix_cases(args.config, config, args.profile)
+    elif mode == "stress":
         wave_count = int(wave_override if wave_override is not None else config.max_active_waves)
         cases = build_worst_cases(config, wave_count, "stress")
     elif mode == "ceiling":
@@ -391,25 +578,39 @@ def main() -> int:
         cases = build_worst_cases(config, wave_count, "ceiling")
     else:
         cases = build_cases(config)
-    results = [time_case(name, max(0.05, args.seconds), args.warmup, args.min_iterations, fn) for name, fn in cases]
+    results = [] if backend_comparison is not None or backend_probes is not None else [time_case(name, max(0.05, args.seconds), args.warmup, args.min_iterations, fn) for name, fn in cases]
     output = {
         "profile": config.runtime_profile,
         "mode": mode,
         "render_mode": config.render_mode,
         "analysis_size": [config.analysis_width, config.analysis_height],
         "motion_analysis_fps": config.motion_analysis_fps,
+        "optical_flow_fps": config.optical_flow_fps,
+        "frame_difference_fill_enabled": config.frame_difference_fill_enabled,
+        "frame_difference_fill_fps": config.frame_difference_fill_fps,
         "led_count": config.total_leds,
         "max_active_waves": config.max_active_waves,
+        "spatial_renderer_backend": config.spatial_renderer_backend,
         "frame_budget": {
             "fps": 60,
             "ms": round(FRAME_BUDGET_MS_60FPS, 4),
         },
         "benchmarks": [result.__dict__ for result in results],
     }
+    if backend_comparison is not None:
+        output["backend_comparison"] = backend_comparison
+    if backend_probes is not None:
+        output["backend_probes"] = backend_probes
     if args.json:
         print(json.dumps(output, indent=2))
+    elif backend_probes is not None:
+        print(f"Profile: {config.runtime_profile}  Backend probe")
+        print_backend_probes(backend_probes)
+    elif backend_comparison is not None:
+        print(f"Profile: {config.runtime_profile}  Backend comparison  60fps budget: {FRAME_BUDGET_MS_60FPS:.2f} ms")
+        print_backend_comparison(backend_comparison["comparison"])
     else:
-        print(f"Profile: {config.runtime_profile}  Mode: {mode}  Render: {config.render_mode}  LEDs: {config.total_leds}  60fps budget: {FRAME_BUDGET_MS_60FPS:.2f} ms")
+        print(f"Profile: {config.runtime_profile}  Mode: {mode}  Render: {config.render_mode}  Backend: {config.spatial_renderer_backend}  LEDs: {config.total_leds}  60fps budget: {FRAME_BUDGET_MS_60FPS:.2f} ms")
         for result in results:
             status = "OK" if result.fits_60fps_budget else "OVER"
             print(

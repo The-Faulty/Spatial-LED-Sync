@@ -49,6 +49,8 @@ class MotionAnalysis:
     ambient_spill_boost_score: float = 0.0
     changed_fraction: float = 0.0
     rate_of_change: float = 0.0
+    shockwave_line_strength: float = 0.0
+    shockwave_line_axis: str = ""
     edge_activity: dict[str, EdgeMotion] = field(default_factory=dict)
     top_corner_activity: dict[str, EdgeMotion] = field(default_factory=dict)
     dominant_flow: tuple[float, float] = (0.0, 0.0)
@@ -62,15 +64,18 @@ class MotionDetector:
     def __init__(self, config: EngineConfig):
         self.config = config
         self.previous_gray: np.ndarray | None = None
+        self.previous_optical_gray: np.ndarray | None = None
+        self.previous_difference_gray: np.ndarray | None = None
         self.history: deque[MotionAnalysis] = deque(maxlen=config.motion_history)
 
     def analyze(self, frame: np.ndarray, requirements: AnalysisRequirements | None = None) -> MotionAnalysis:
         requirements = requirements or AnalysisRequirements()
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if requirements.frame_difference or requirements.optical_flow else None
         stats = FrameProcessor.color_stats(frame) if requirements.color_stats else {"brightness": 0.0, "saturation": 0.0, "color": (0, 0, 0)}
-        if self.previous_gray is None:
+        previous_gray = self._previous_gray_for_requirements(requirements)
+        if previous_gray is None:
             if gray is not None:
-                self.previous_gray = gray
+                self._store_previous_gray(gray, requirements)
             bloom = self._luminous_bloom_metrics(frame, None) if requirements.color_stats else {}
             analysis = MotionAnalysis(
                 brightness=float(stats["brightness"]),
@@ -81,12 +86,12 @@ class MotionDetector:
             self.history.append(analysis)
             return analysis
 
-        if gray is None or self.previous_gray is None:
+        if gray is None or previous_gray is None:
             analysis = MotionAnalysis()
         elif requirements.optical_flow and self.config.motion_algorithm != "frame_difference":
-            analysis = self._optical_flow(frame, gray, requirements)
+            analysis = self._optical_flow(frame, gray, previous_gray, requirements)
         elif requirements.frame_difference or requirements.edge_activity or requirements.top_corner_activity:
-            analysis = self._frame_difference(frame, gray, requirements)
+            analysis = self._frame_difference(frame, gray, previous_gray, requirements)
         else:
             analysis = MotionAnalysis()
 
@@ -107,13 +112,27 @@ class MotionDetector:
             self._apply_edge_color_velocity(analysis, prev)
         analysis.scene_change = analysis.changed_fraction > self.config.flash_changed_fraction
         if gray is not None:
-            self.previous_gray = gray
+            self._store_previous_gray(gray, requirements)
         self.history.append(analysis)
         return analysis
 
-    def _optical_flow(self, frame: np.ndarray, gray: np.ndarray, requirements: AnalysisRequirements) -> MotionAnalysis:
+    def _previous_gray_for_requirements(self, requirements: AnalysisRequirements) -> np.ndarray | None:
+        if requirements.optical_flow and self.config.motion_algorithm != "frame_difference":
+            return self.previous_optical_gray
+        if requirements.frame_difference or requirements.edge_activity or requirements.top_corner_activity:
+            return self.previous_difference_gray
+        return self.previous_gray
+
+    def _store_previous_gray(self, gray: np.ndarray, requirements: AnalysisRequirements) -> None:
+        self.previous_gray = gray
+        if requirements.optical_flow and self.config.motion_algorithm != "frame_difference":
+            self.previous_optical_gray = gray
+        if requirements.frame_difference or requirements.edge_activity or requirements.top_corner_activity:
+            self.previous_difference_gray = gray
+
+    def _optical_flow(self, frame: np.ndarray, gray: np.ndarray, previous_gray: np.ndarray, requirements: AnalysisRequirements) -> MotionAnalysis:
         flow = cv2.calcOpticalFlowFarneback(
-            self.previous_gray,
+            previous_gray,
             gray,
             None,
             pyr_scale=0.5,
@@ -126,7 +145,7 @@ class MotionDetector:
         )
         mag, ang = cv2.cartToPolar(flow[:, :, 0], flow[:, :, 1])
         heatmap = np.clip(mag / 8.0, 0.0, 1.0)
-        changed = cv2.absdiff(gray, self.previous_gray)
+        changed = cv2.absdiff(gray, previous_gray)
         analysis = MotionAnalysis(
             changed_fraction=float(np.mean(changed > 22)),
             dominant_flow=(float(np.mean(flow[:, :, 0])), float(np.mean(flow[:, :, 1]))),
@@ -134,14 +153,17 @@ class MotionDetector:
             flow_vectors=flow if requirements.retain_flow_debug else None,
             heatmap=heatmap if requirements.retain_flow_debug else None,
         )
+        line_strength, line_axis = self._shockwave_line_metrics(changed > 22)
+        analysis.shockwave_line_strength = line_strength
+        analysis.shockwave_line_axis = line_axis
         if requirements.edge_activity:
             analysis.edge_activity = self._edge_motion_from_flow(frame, flow, mag)
         if requirements.top_corner_activity:
             analysis.top_corner_activity = self._top_corner_motion_from_flow(frame, flow, mag)
         return analysis
 
-    def _frame_difference(self, frame: np.ndarray, gray: np.ndarray, requirements: AnalysisRequirements) -> MotionAnalysis:
-        diff = cv2.absdiff(gray, self.previous_gray)
+    def _frame_difference(self, frame: np.ndarray, gray: np.ndarray, previous_gray: np.ndarray, requirements: AnalysisRequirements) -> MotionAnalysis:
+        diff = cv2.absdiff(gray, previous_gray)
         _, mask = cv2.threshold(diff, 22, 255, cv2.THRESH_BINARY)
         moments = cv2.moments(mask)
         h, w = gray.shape
@@ -163,6 +185,9 @@ class MotionDetector:
             flow_vectors=pseudo_flow if requirements.retain_flow_debug else None,
             heatmap=heatmap if requirements.retain_flow_debug else None,
         )
+        line_strength, line_axis = self._shockwave_line_metrics(mask > 0)
+        analysis.shockwave_line_strength = line_strength
+        analysis.shockwave_line_axis = line_axis
         if requirements.edge_activity:
             analysis.edge_activity = self._edge_motion_from_flow(frame, pseudo_flow, mag)
         if requirements.top_corner_activity:
@@ -247,6 +272,43 @@ class MotionDetector:
                 activity.color_velocity = analysis.color_velocity
             else:
                 activity.color_velocity = self._color_velocity(activity.color, previous_activity.color)
+
+    def _shockwave_line_metrics(self, changed: np.ndarray) -> tuple[float, str]:
+        if changed.size == 0:
+            return 0.0, ""
+        changed_fraction = float(np.mean(changed))
+        if changed_fraction >= 0.68:
+            return 0.0, ""
+        row_score = self._line_axis_score(np.mean(changed, axis=1), changed_fraction)
+        col_score = self._line_axis_score(np.mean(changed, axis=0), changed_fraction)
+        if row_score >= col_score and row_score > 0.0:
+            return row_score, "horizontal"
+        if col_score > 0.0:
+            return col_score, "vertical"
+        return 0.0, ""
+
+    @staticmethod
+    def _line_axis_score(fractions: np.ndarray, changed_fraction: float) -> float:
+        if fractions.size == 0:
+            return 0.0
+        active = fractions >= 0.42
+        if not np.any(active):
+            return 0.0
+        best = 0.0
+        start: int | None = None
+        for idx, is_active in enumerate(np.append(active, False)):
+            if is_active and start is None:
+                start = idx
+            elif not is_active and start is not None:
+                run = fractions[start:idx]
+                width_ratio = run.size / max(1, fractions.size)
+                if 0.015 <= width_ratio <= 0.26:
+                    peak = float(np.max(run))
+                    narrow_score = float(np.clip((0.30 - width_ratio) / 0.285, 0.0, 1.0))
+                    contrast = float(np.clip((peak - changed_fraction) / 0.42, 0.0, 1.0))
+                    best = max(best, peak * (0.45 + 0.35 * narrow_score + 0.20 * contrast))
+                start = None
+        return float(np.clip(best, 0.0, 1.0))
 
     def _luminous_bloom_metrics(self, frame: np.ndarray, previous: MotionAnalysis | None) -> dict[str, float | tuple[int, int, int]]:
         rgb = frame[:, :, ::-1].astype(np.float32) / 255.0

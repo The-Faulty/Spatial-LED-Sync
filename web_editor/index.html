@@ -38,6 +38,9 @@
           <legend>Render Performance</legend>
           <label>Target FPS <input id="target-fps" type="number" min="1" max="90" step="1" /></label>
           <label>WLED FPS <input id="wled-fps" type="number" min="1" max="90" step="1" /></label>
+          <label>Optical Flow FPS <input id="optical-flow-fps" type="number" min="1" max="90" step="1" /></label>
+          <label>Frame Diff Fill <input id="frame-difference-fill-enabled" type="checkbox" /></label>
+          <label>Frame Diff Fill FPS <input id="frame-difference-fill-fps" type="number" min="0" max="90" step="1" /></label>
           <label>Mode
             <select id="render-mode">
               <option value="full_frame">full_frame</option>
@@ -61,6 +64,11 @@
           <details class="effect-panel" open>
             <summary>Trigger sensitivity</summary>
             <div id="effect-sensitivity" class="effect-sensitivity"></div>
+            <label class="effect-sensitivity-row">
+              <span>Variable event intensity</span>
+              <input id="variable-event-intensity" type="checkbox" />
+              <span class="effect-sensitivity-value">Scale waves from trigger strength</span>
+            </label>
           </details>
           <details class="effect-panel" open>
             <summary>Ambient spill</summary>

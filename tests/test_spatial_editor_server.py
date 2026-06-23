@@ -201,6 +201,7 @@ class EditorServerCase(unittest.TestCase):
                 "tv_image_blur": 11,
                 "ambient_side_spill_base_intensity": 0.25,
                 "ambient_side_spill_boost_intensity": 1.6,
+                "variable_event_intensity": False,
             },
         )
         self.assertTrue(payload["ok"], payload)
@@ -211,6 +212,7 @@ class EditorServerCase(unittest.TestCase):
         self.assertEqual(payload["tv_image_blur"], 11)
         self.assertEqual(payload["ambient_side_spill_base_intensity"], 0.25)
         self.assertEqual(payload["ambient_side_spill_boost_intensity"], 1.6)
+        self.assertFalse(payload["variable_event_intensity"])
         saved = json.loads(self.config_path.read_text(encoding="utf-8"))
         self.assertFalse(saved["enabled_effects"]["shockwave"])
         self.assertEqual(saved["effect_sensitivity"]["shockwave"], 0.85)
@@ -218,6 +220,7 @@ class EditorServerCase(unittest.TestCase):
         self.assertEqual(saved["tv_image_blur"], 11)
         self.assertEqual(saved["ambient_side_spill_base_intensity"], 0.25)
         self.assertEqual(saved["ambient_side_spill_boost_intensity"], 1.6)
+        self.assertFalse(saved["variable_event_intensity"])
         runtime = SpatialEditorHandler.preview_manager.runtime
         self.assertIsNotNone(runtime)
         self.assertFalse(runtime.config.enabled_effects["shockwave"])
@@ -226,6 +229,7 @@ class EditorServerCase(unittest.TestCase):
         self.assertEqual(runtime.config.tv_image_blur, 11)
         self.assertEqual(runtime.config.ambient_side_spill_base_intensity, 0.25)
         self.assertEqual(runtime.config.ambient_side_spill_boost_intensity, 1.6)
+        self.assertFalse(runtime.config.variable_event_intensity)
         status = self.get_json("/api/preview/status")
         self.assertIn("enabled_effects", status)
         self.assertFalse(status["enabled_effects"]["shockwave"])
@@ -234,6 +238,7 @@ class EditorServerCase(unittest.TestCase):
         self.assertEqual(status["tv_image_blur"], 11)
         self.assertEqual(status["ambient_side_spill_base_intensity"], 0.25)
         self.assertEqual(status["ambient_side_spill_boost_intensity"], 1.6)
+        self.assertFalse(status["variable_event_intensity"])
 
     def test_preview_status_reports_saved_effects_when_stopped(self) -> None:
         payload = self.post_json(
@@ -258,6 +263,12 @@ class EditorServerCase(unittest.TestCase):
                 "enabled_effects": {"portal_vortex": False, "front_ambient": False},
                 "effect_sensitivity": {"portal_vortex": 0.8},
                 "ambient_side_spill_boost_intensity": 1.4,
+                "variable_event_intensity": False,
+                "target_fps": 60,
+                "wled_fps": 60,
+                "optical_flow_fps": 15,
+                "frame_difference_fill_enabled": True,
+                "frame_difference_fill_fps": 0,
             },
         )
         self.assertTrue(payload["ok"], payload)
@@ -267,10 +278,17 @@ class EditorServerCase(unittest.TestCase):
         self.assertFalse(runtime.config.enabled_effects["front_ambient"])
         self.assertEqual(runtime.config.effect_sensitivity["portal_vortex"], 0.8)
         self.assertEqual(runtime.config.ambient_side_spill_boost_intensity, 1.4)
+        self.assertFalse(runtime.config.variable_event_intensity)
+        self.assertEqual(runtime.config.target_fps, 60)
+        self.assertEqual(runtime.config.wled_fps, 60)
+        self.assertEqual(runtime.config.optical_flow_fps, 15)
+        self.assertTrue(runtime.config.frame_difference_fill_enabled)
+        self.assertEqual(runtime.config.frame_difference_fill_fps, 0)
         status = self.get_json("/api/preview/status")
         self.assertFalse(status["enabled_effects"]["portal_vortex"])
         self.assertEqual(status["effect_sensitivity"]["portal_vortex"], 0.8)
         self.assertEqual(status["ambient_side_spill_boost_intensity"], 1.4)
+        self.assertFalse(status["variable_event_intensity"])
 
     def test_effect_toggle_removes_active_disabled_preview_waves(self) -> None:
         class FakeRuntime:
@@ -463,6 +481,9 @@ class EditorServerCase(unittest.TestCase):
         self.assertIn(b'id="effect-sensitivity"', index)
         self.assertIn(b'id="ambient-side-spill-base-intensity"', index)
         self.assertIn(b'id="ambient-side-spill-boost-intensity"', index)
+        self.assertIn(b'id="optical-flow-fps"', index)
+        self.assertIn(b'id="frame-difference-fill-enabled"', index)
+        self.assertIn(b'id="frame-difference-fill-fps"', index)
         self.assertIn(b'id="effect-patterns"', index)
         self.assertIn(b'id="triggered-effects"', index)
         self.assertIn(b'id="active-effects"', index)
@@ -474,6 +495,10 @@ class EditorServerCase(unittest.TestCase):
         self.assertIn(b"ambient_side_spill_base_intensity", app)
         self.assertIn(b"ambient_side_spill_boost_intensity", app)
         self.assertIn(b"tv_image_blur", app)
+        self.assertIn(b"variable_event_intensity", app)
+        self.assertIn(b"optical_flow_fps", app)
+        self.assertIn(b"frame_difference_fill_enabled", app)
+        self.assertIn(b"frame_difference_fill_fps", app)
         self.assertIn(b'id="tv-image-blur"', index)
         self.assertIn(b"TV image blur", index)
         self.assertIn(b"TRIGGER_EFFECTS", app)

@@ -16,13 +16,11 @@ if errorlevel 1 (
 )
 
 echo Running subsystem benchmarks against a 60fps frame budget...
-".venv\Scripts\python.exe" benchmark_parts.py --profile pi_zero --seconds 0.75
-".venv\Scripts\python.exe" benchmark_parts.py --profile pi_5 --seconds 0.75
+".venv\Scripts\python.exe" benchmark_parts.py --profile pi_zero --seconds 0.75 --backend-comparison
+".venv\Scripts\python.exe" benchmark_parts.py --profile pi_5 --seconds 0.75 --backend-comparison
 
 echo Running stress subsystem benchmark with 2000 LEDs and the Pi 5 profile wave cap...
-".venv\Scripts\python.exe" benchmark_parts.py --profile pi_5 --seconds 1.0 --warmup 10 --min-iterations 20 --mode stress
-".venv\Scripts\python.exe" benchmark_parts.py --profile pi_5 --seconds 1.0 --warmup 10 --min-iterations 20 --mode stress --render-mode edge_effects
-".venv\Scripts\python.exe" benchmark_parts.py --profile pi_5 --seconds 1.0 --warmup 10 --min-iterations 20 --mode stress --render-mode hybrid_edge_full
+".venv\Scripts\python.exe" benchmark_parts.py --profile pi_5 --seconds 1.0 --warmup 10 --min-iterations 20 --mode stress --backend-comparison
 
 
 echo For a 100-wave overload test, run:

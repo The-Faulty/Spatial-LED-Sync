@@ -91,6 +91,9 @@ class EngineConfig:
 
     target_fps: int = 90
     motion_analysis_fps: int = 15
+    optical_flow_fps: int = 15
+    frame_difference_fill_enabled: bool = False
+    frame_difference_fill_fps: int = 0
     wled_fps: int = 90
     parallel_runtime: bool = True
     tv_frame_queue_size: int = 1
@@ -130,6 +133,7 @@ class EngineConfig:
     wave_decay: float = 0.95
     wave_spread: float = 9.0
     wave_min_intensity: float = 0.01
+    variable_event_intensity: bool = True
     color_velocity_speed_boost: float = 0.85
     color_velocity_decay_boost: float = 0.10
     top_color_exit_velocity_threshold: float = 0.20
@@ -166,6 +170,7 @@ class EngineConfig:
     runtime_profile: str = "desktop_dev"
     overload_policy: str = "adaptive_quality"
     effect_render_skip_policy: str = "tv_first"
+    spatial_renderer_backend: str = "auto"
     spatial_priority_bands: int = 3
     spatial_near_budget_ratio: float = 1.0
     spatial_mid_budget_ratio: float = 0.75
@@ -254,6 +259,12 @@ class EngineConfig:
             errors.append("target_fps must be greater than 0")
         if self.motion_analysis_fps <= 0:
             errors.append("motion_analysis_fps must be greater than 0")
+        if self.optical_flow_fps <= 0:
+            errors.append("optical_flow_fps must be greater than 0")
+        if self.frame_difference_fill_fps < 0:
+            errors.append("frame_difference_fill_fps must be zero or greater")
+        if not isinstance(self.frame_difference_fill_enabled, bool):
+            errors.append("frame_difference_fill_enabled must be true or false")
         if self.wled_fps <= 0:
             errors.append("wled_fps must be greater than 0")
         if self.tv_frame_queue_size <= 0:
@@ -264,6 +275,8 @@ class EngineConfig:
             errors.append("event_queue_size must be greater than 0")
         if self.effect_render_skip_policy not in {"tv_first", "none"}:
             errors.append("effect_render_skip_policy must be tv_first or none")
+        if self.spatial_renderer_backend not in {"auto", "numpy", "numba", "gles"}:
+            errors.append("spatial_renderer_backend must be auto, numpy, numba, or gles")
         if self.spatial_priority_bands <= 0:
             errors.append("spatial_priority_bands must be greater than 0")
         for name in ("spatial_near_budget_ratio", "spatial_mid_budget_ratio", "spatial_far_budget_ratio"):
@@ -333,6 +346,8 @@ class EngineConfig:
                     errors.append(f"effect_sensitivity.{name} must be between 0.0 and 1.0")
         if self.level1_threshold > self.level2_threshold:
             errors.append("level1_threshold must be less than or equal to level2_threshold")
+        if not isinstance(self.variable_event_intensity, bool):
+            errors.append("variable_event_intensity must be true or false")
         if self.motion_algorithm not in {"optical_flow", "frame_difference"}:
             errors.append("motion_algorithm must be optical_flow or frame_difference")
         for name in ("color_velocity_speed_boost", "color_velocity_decay_boost"):

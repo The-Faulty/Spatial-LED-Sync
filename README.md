@@ -42,6 +42,33 @@ Quick launch scripts are also included:
 - `Run Pi Zero Benchmark.bat` / `Run Pi Zero Benchmark.ps1`: 15-second simulated benchmark using the Pi Zero profile.
 - `Run Pi 5 Benchmark.bat` / `Run Pi 5 Benchmark.ps1`: 15-second simulated benchmark using the Pi 5 profile.
 
+Linux launch scripts live in `scripts/linux/`:
+
+```bash
+chmod +x scripts/linux/*.sh
+scripts/linux/setup.sh
+scripts/linux/run-pi-zero-live.sh --wled
+scripts/linux/run-pi-5-live.sh --wled
+scripts/linux/run-editor.sh
+HOST=0.0.0.0 scripts/linux/run-editor.sh
+scripts/linux/benchmark-parts.sh
+```
+
+The scripts create `.venv`, install `requirements.txt`, run from the project root, and pass through any extra CLI flags. For boot launch on a Pi, copy `scripts/linux/ambilight-effects.service` to `/etc/systemd/system/`, update its `WorkingDirectory` and `ExecStart` paths if the repo is not in `/opt/Ambilight-Effects`, then enable it with `sudo systemctl enable --now ambilight-effects`.
+
+`scripts/linux/setup.sh` also installs optional acceleration dependencies by default:
+
+- Raspberry Pi OS packages for Python native builds, OpenCV, EGL, and OpenGL ES.
+- Python packages `numba` and `moderngl`.
+
+Use `INSTALL_ACCEL=0 scripts/linux/setup.sh` to skip Numba/ModernGL, `INSTALL_GLES=0 scripts/linux/setup.sh` to install Numba without ModernGL, or `INSTALL_SYSTEM_PACKAGES=0 scripts/linux/setup.sh` to skip `apt-get` packages.
+
+Or generate and install the service for the current checkout path:
+
+```bash
+PROFILE=pi_zero EXTRA_ARGS=--wled scripts/linux/install-systemd-service.sh
+```
+
 In the GUI preview tab, simulation is idle by default. Use the Simulation Triggers buttons to fire specific test effects such as left/right exits, top spill, explosion, screen flash, shockwave, camera pans, and energy trail.
 
 ## Configuration
@@ -60,12 +87,16 @@ Important fields:
 - `send_to_wled`: set `true` to emit LED frames.
 - `runtime_profile`: `desktop_dev`, `pi_zero`, or `pi_5`.
 - `overload_policy`: `adaptive_quality`, `fixed_quality`, or `output_first`.
+- `spatial_renderer_backend`: `auto`, `numpy`, `numba`, or `gles`. `auto` tries the experimental GLES path, then Numba, then the built-in NumPy renderer.
 - `spatial`: optional 3D room model with room dimensions, TV placement, WLED devices, and wall-mounted strips.
 - `total_leds`: total ceiling perimeter LEDs.
 - `front_wall`, `left_wall`, `rear_wall`, `right_wall`: inclusive LED ranges; ranges may wrap across index `0`.
 - `clockwise_order`: physical wall order.
 - `tv_center_led`, `tv_left_boundary`, `tv_right_boundary`: spill origins on the front wall.
 - `motion_algorithm`: `optical_flow` or `frame_difference`.
+- `optical_flow_fps`: maximum cadence for expensive optical-flow passes; use `15` on Pi targets.
+- `frame_difference_fill_enabled`: run cheap frame-difference analysis between optical-flow passes for flash, shockwave, lightning, impact pulse, negative wave, color stats, and ambient spill boost responsiveness.
+- `frame_difference_fill_fps`: fill cadence; `0` means use the render target FPS, capped by `target_fps`.
 - `lighting_mode`: `cinematic` keeps the original sparse spill behavior; `front_ambient` makes the front wall behave more like a soft TV extension while side/rear walls stay reserved for major effects.
 - `front_ambient_source`: `top_strip` mirrors the top band of the incoming video onto the TV span; `average` uses the older single-color ambient wash.
 - `front_ambient_top_height`: fraction of the video height sampled for the top ambient strip.
@@ -83,6 +114,18 @@ Benchmark the Pi-oriented headless runtime without WLED output:
 
 ```powershell
 python benchmark.py --profile pi_zero --seconds 15
+```
+
+Benchmark just the spatial renderer at 240, 1300, and 2000 LEDs with 20 and 50 waves:
+
+```powershell
+python benchmark_parts.py --profile pi_zero --renderer-matrix --spatial-renderer-backend auto --seconds 2
+```
+
+Compare NumPy, Numba, and GLES backends in one table:
+
+```powershell
+python benchmark_parts.py --profile pi_zero --backend-comparison --seconds 2
 ```
 
 ## Architecture
@@ -166,9 +209,11 @@ Color velocity modifies each wave after detection. Fast color changes increase w
 - Lower `analysis_width` and `analysis_height` for Raspberry Pi targets.
 - Use `frame_difference` if optical flow is too expensive.
 - `target_fps` and `wled_fps` can run up to 90 for low-latency preview/output; reduce them on Pi targets if rendering or WLED cannot keep up.
-- Use `motion_analysis_fps` to run motion/event detection slower than LED rendering. Live/headless runtime defaults to `parallel_runtime: true`, so rendering and WLED output continue while analysis works on the latest frame.
+- Use `motion_analysis_fps` and `optical_flow_fps` to run optical-flow detection slower than LED rendering. Live/headless runtime defaults to `parallel_runtime: true`, so rendering and WLED output continue while analysis works on the latest frame.
+- For Pi testing, start with `target_fps` at `60` or `90`, `optical_flow_fps: 15`, `frame_difference_fill_enabled: true`, and `frame_difference_fill_fps: 0`.
 - Use `render_mode` to trade analysis quality for CPU. `full_frame` preserves current behavior, `edge_effects` analyzes compact edge bands, and `hybrid_edge_full` samples TV strips from edge bands while detecting effects on a tiny full-frame image.
 - Direct `tv_image` and `blend` strips use the freshest prepared frame in the render loop. Under load, spatial effects degrade before TV sync, prioritizing LEDs closest to the configured TV center before far side/rear LEDs.
+- The spatial renderer can use optional acceleration. `numba` requires a separate Numba install. `gles` requires a working EGL/ModernGL stack and self-tests at startup before it is selected.
 - Keep `analysis_queue_size` and `event_queue_size` small. The default latest-wins queues drop stale analysis work instead of delaying LED output.
 - Limit `max_active_waves` to bound CPU cost.
 - Run with `--no-debug` for live deployments.
